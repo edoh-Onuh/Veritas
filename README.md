@@ -82,16 +82,23 @@ Scores a claim and prints the exact `submit_claim` instruction args (inputs_hash
 
 ### On-chain program (build locally)
 
-Requires the Solana + Anchor toolchain (`anchor 0.30.1`, `solana` CLI):
+Requires Linux/WSL with Solana CLI `1.18.26`, Anchor CLI `0.30.1`, and Rust `nightly-2025-04-10` (for IDL generation only):
 
 ```bash
+rustup toolchain install nightly-2025-04-10 --profile minimal
+export RUSTUP_TOOLCHAIN=nightly-2025-04-10   # Anchor 0.30.1 builds the IDL with +nightly;
+                                             # newer nightlies removed proc_macro::SourceFile
 anchor build
-anchor keys list                  # copy the program id
-# paste it into declare_id! in programs/veritas/src/lib.rs and Anchor.toml
-anchor build
-anchor test                       # local validator: submit → challenge → resolve
+anchor test --provider.cluster localnet      # local validator: submit → challenge → resolve
+# WSL1 only: Anchor's port check wrongly reports 8899 as in use, so start the validator yourself:
+#   solana-test-validator --reset --quiet &
+#   anchor test --skip-local-validator --provider.cluster localnet
 anchor deploy --provider.cluster devnet
 ```
+
+The program is deployed on devnet at `DypSeezrbcEhDSJNganfpjjkQXp1NBAHpvDAQrQBHLEW`. Building your own deployment? Run `anchor keys list` and put your id in `declare_id!` and `Anchor.toml`.
+
+`Cargo.lock` is resolved for the Rust 1.75 compiler inside Solana 1.18's platform-tools, with `blake3 1.8.2`, `jobserver 0.1.32` and `proc-macro2 1.0.94` pinned. Don't `cargo update` it.
 
 > **Verified vs. build-locally.** The Python engine and its 16 tests, and the bridge script, are tested and passing in this repo. The Rust program and TypeScript tests are written against the Anchor 0.30.1 API but must be compiled with the Solana/Anchor toolchain on your machine — those toolchains aren't installable in the sandbox this was authored in. Build them locally before the demo.
 
