@@ -15,8 +15,10 @@ law a claim violates and by how much.
 
 Design notes
 ------------
-- Pure-Python, one optional dependency (`requests`). Falls back to a bundled
-  offline grid value if the network is unavailable, so the demo never dies live.
+- Pure-Python, one optional dependency (`requests`). If live grid data is
+  unavailable the engine says so and refuses to certify the carbon claim,
+  rather than scoring it against a guessed intensity: a submitter who can force
+  a fallback value can choose their own ceiling.
 - Deterministic: same inputs -> same verdict. This is what lets an on-chain
   challenge/resolve step reproduce the score trustlessly.
 - The canonical claim serialization + sha256 is the exact commitment that would
@@ -157,22 +159,28 @@ class Verdict:
 # Grid ground truth (live NESO, with offline fallback)
 # --------------------------------------------------------------------------- #
 
-# Regional fallback values (gCO2/kWh) used only if the network is unavailable,
-# so a live demo never breaks. Chosen mid-range; overridden by real data when
-# reachable.
-_FALLBACK_REGION_INTENSITY = 180
+# NESO DNO region ids. A claim naming anything else cannot be checked against
+# live grid data at all, so it is rejected rather than scored against a guess.
+VALID_REGION_IDS = range(1, 18)
 
 
-def fetch_grid_intensity(region_id: int, period_from: str) -> tuple[float, str]:
+def fetch_grid_intensity(region_id: int, period_from: str) -> tuple[Optional[float], str]:
     """Return (actual gCO2/kWh, source string) for a DNO region at a slot.
 
     Uses the NESO regional endpoint:
       GET https://api.carbonintensity.org.uk/regional/intensity/{from}/fw24h
-    We request a window starting at period_from and take the matching slot.
-    Falls back to a bundled value if offline.
+    We request a window starting at period_from and take that exact slot.
+
+    Returns (None, reason) when live data for that slot is unavailable. The
+    engine then refuses to certify the carbon claim instead of substituting a
+    guessed intensity, and instead of scoring the claim against a *different*
+    half-hour: either would let a submitter pick their own ceiling by choosing
+    a region or a timestamp the API cannot answer.
     """
+    if region_id not in VALID_REGION_IDS:
+        return None, f"unknown DNO region id {region_id} (valid: 1..17)"
     if not _HAVE_REQUESTS:
-        return float(_FALLBACK_REGION_INTENSITY), "offline fallback (requests missing)"
+        return None, "live grid data unavailable (requests not installed)"
 
     url = (
         f"https://api.carbonintensity.org.uk/regional/intensity/"
@@ -183,22 +191,15 @@ def fetch_grid_intensity(region_id: int, period_from: str) -> tuple[float, str]:
         r.raise_for_status()
         data = r.json()["data"]
         slots = data.get("data") if isinstance(data, dict) else data
-        # find the slot whose 'from' matches our period start
+        # only the slot whose 'from' matches our period start will do
         for slot in slots:
             if slot["from"] == period_from:
-                intensity = slot["intensity"]
-                val = intensity.get("forecast")  # regional gives forecast
+                val = slot["intensity"].get("forecast")  # regional gives forecast
                 if val is not None:
-                    return float(val), "NESO regional API (forecast, region " \
-                                       f"{region_id})"
-        # fall back to first available slot
-        if slots:
-            val = slots[0]["intensity"].get("forecast")
-            if val is not None:
-                return float(val), f"NESO regional API (nearest slot, region {region_id})"
-    except Exception as e:  # network, shape, timeout — degrade gracefully
-        return float(_FALLBACK_REGION_INTENSITY), f"offline fallback ({type(e).__name__})"
-    return float(_FALLBACK_REGION_INTENSITY), "offline fallback (no matching slot)"
+                    return float(val), f"NESO regional API (forecast, region {region_id})"
+        return None, "live grid data unavailable (no matching settlement slot)"
+    except Exception as e:  # network, shape, timeout — no ground truth, no verdict
+        return None, f"live grid data unavailable ({type(e).__name__})"
 
 
 # --------------------------------------------------------------------------- #
@@ -300,10 +301,18 @@ def check_resource_envelope(claim: Claim) -> CheckResult:
     )
 
 
-def check_avoided_emissions_bound(claim: Claim, grid_intensity: float,
+def check_avoided_emissions_bound(claim: Claim, grid_intensity: Optional[float],
                                   source: str) -> CheckResult:
     """The core carbon check. You cannot claim to avoid more CO2 than the grid
     would have emitted producing the same energy."""
+    if grid_intensity is None:
+        return CheckResult(
+            "avoided_emissions_bound",
+            "avoided CO2 <= energy delivered x grid carbon intensity",
+            Status.SKIP,
+            f"no ground truth for this slot ({source}) — the carbon claim "
+            f"cannot be certified without it",
+        )
     max_avoided_kg = claim.energy_delivered_kwh * grid_intensity / 1000.0
     ceiling = max_avoided_kg * (1 + _CARBON_TOLERANCE)
     if claim.claimed_co2_avoided_kg > ceiling:
@@ -374,14 +383,77 @@ def check_temporal_validity(claim: Claim) -> CheckResult:
                        Status.PASS, "valid past-dated 30-min settlement slot")
 
 
+def _is_finite_number(value) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def check_input_validity(claim: Claim) -> CheckResult:
+    """Reject figures that are not physical quantities before any bound is
+    tested.
+
+    This runs first because NaN compares false against every bound: an
+    unvalidated NaN passes the capacity ceiling, the resource envelope and the
+    carbon ceiling alike, and would be scored PLAUSIBLE. Negative energy does
+    the same to the carbon ceiling, which scales with it.
+    """
+    law = "inputs must be finite, non-negative physical quantities"
+    problems = []
+
+    if not _is_finite_number(claim.energy_delivered_kwh) or claim.energy_delivered_kwh < 0:
+        problems.append(f"energy_delivered_kwh={claim.energy_delivered_kwh!r}")
+    if not _is_finite_number(claim.claimed_co2_avoided_kg) or claim.claimed_co2_avoided_kg < 0:
+        problems.append(f"claimed_co2_avoided_kg={claim.claimed_co2_avoided_kg!r}")
+    if (not _is_finite_number(claim.asset.nameplate_capacity_kw)
+            or claim.asset.nameplate_capacity_kw <= 0):
+        problems.append(f"nameplate_capacity_kw={claim.asset.nameplate_capacity_kw!r}")
+    if not _is_finite_number(claim.asset.latitude) or not -90.0 <= claim.asset.latitude <= 90.0:
+        problems.append(f"latitude={claim.asset.latitude!r}")
+    if claim.asset.region_id not in VALID_REGION_IDS:
+        problems.append(f"region_id={claim.asset.region_id!r} (valid: 1..17)")
+    intensity = claim.self_reported_intensity_gco2_kwh
+    if intensity is not None and (not _is_finite_number(intensity) or intensity < 0):
+        problems.append(f"self_reported_intensity_gco2_kwh={intensity!r}")
+    try:
+        _parse(claim.period_from)
+        _parse(claim.period_to)
+    except Exception:
+        problems.append("period timestamps are not ISO8601")
+
+    if problems:
+        return CheckResult(
+            "input_validity", law, Status.HARD_FAIL,
+            "not a scorable claim: " + ", ".join(problems),
+        )
+    return CheckResult(
+        "input_validity", law, Status.PASS,
+        "all figures finite, non-negative and within range",
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Orchestration
 # --------------------------------------------------------------------------- #
 
 def score(claim: Claim) -> Verdict:
+    # Nothing else runs on figures that are not quantities: the bounds below
+    # would silently pass them, and the timestamp checks would raise.
+    validity = check_input_validity(claim)
+    if validity.status == Status.HARD_FAIL:
+        return Verdict(
+            verdict="INVALID",
+            integrity_score=0.0,
+            hardest_failure=validity.id,
+            grid_intensity_used=None,
+            grid_data_source="not fetched (claim rejected before scoring)",
+            inputs_hash=claim.inputs_hash(),
+            checks=[validity],
+        )
+
     grid_intensity, source = fetch_grid_intensity(claim.asset.region_id,
                                                   claim.period_from)
     checks = [
+        validity,
         check_temporal_validity(claim),
         check_capacity_ceiling(claim),
         check_resource_envelope(claim),
@@ -397,9 +469,18 @@ def score(claim: Claim) -> Verdict:
         verdict = "IMPOSSIBLE"
         hardest = hard[0].id
     elif soft:
-        integrity = 0.55
+        # 0.45 -> 4500 bps, below the on-chain implausibility threshold, so a
+        # soft failure cannot be confirmed by the challenge game.
+        integrity = 0.45
         verdict = "IMPLAUSIBLE"
         hardest = soft[0].id
+    elif grid_intensity is None:
+        # Every bound the engine could test passed, but the carbon ceiling is
+        # the moat and it had no ground truth: say so instead of certifying.
+        # 0.50 -> 5000 bps, at the threshold, so it cannot be confirmed either.
+        integrity = 0.50
+        verdict = "UNVERIFIED"
+        hardest = "avoided_emissions_bound"
     else:
         integrity = 0.95
         verdict = "PLAUSIBLE"

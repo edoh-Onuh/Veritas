@@ -20,8 +20,10 @@ prints the verdict + the exact instruction args you'd send.
 """
 
 import argparse
+import hashlib
 import sys
 import os
+from datetime import datetime, timezone
 
 # make the engine importable whether run from repo root or scripts/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
@@ -55,6 +57,30 @@ def score_to_bps(score_float: float) -> int:
     return max(0, min(10_000, round(score_float * 10_000)))
 
 
+def asset_id(claim: Claim) -> str:
+    """The on-chain asset id: sha256 of the asset's registry identity.
+
+    The program holds capacity, region and latitude in the Asset account, so a
+    claim is judged against the registered figures rather than the ones a
+    submitter types in. This derives the same id the registrar used.
+    """
+    identity = "|".join([
+        claim.asset.type.value,
+        f"{claim.asset.nameplate_capacity_kw:.3f}",
+        str(claim.asset.region_id),
+        f"{claim.asset.latitude:.5f}",
+        claim.asset.location_hint,
+    ])
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def period_start(claim: Claim) -> int:
+    """Settlement slot start as a unix timestamp, the second half of the
+    (asset, slot) pair that makes a reading claimable only once."""
+    parsed = datetime.fromisoformat(claim.period_from.replace("Z", "+00:00"))
+    return int(parsed.astimezone(timezone.utc).timestamp())
+
+
 def main():
     p = argparse.ArgumentParser(description="Score a claim and commit it on-chain")
     p.add_argument("--demo", help="use a bundled demo claim: good|impossible|inflated")
@@ -84,11 +110,15 @@ def main():
     bps = score_to_bps(verdict.integrity_score)
     print("\n" + "-" * 66)
     print("On-chain commitment (submit_claim instruction args):")
+    print(f"  asset_id             : {asset_id(claim)}")
     print(f"  inputs_hash          : {verdict.inputs_hash}")
     print(f"  model_version        : 1")
+    print(f"  period_start         : {period_start(claim)}  ({claim.period_from})")
     print(f"  claimed_co2_kg       : {int(claim.claimed_co2_avoided_kg)}")
     print(f"  integrity_score_bps  : {bps}")
     print(f"  bond (lamports)      : 100000000  (0.1 SOL)")
+    print("\n  The asset must already be registered on-chain under this asset_id,")
+    print("  and the submitting wallet must be its registered owner.")
 
     if args.dry_run or not _can_submit():
         print("\n[dry-run] not submitting on-chain.")

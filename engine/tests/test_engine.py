@@ -11,7 +11,7 @@ from veritas.engine import (
     Asset, AssetType, Claim, Status, score, fetch_grid_intensity,
     check_capacity_ceiling, check_avoided_emissions_bound,
     check_resource_envelope, check_internal_consistency,
-    check_temporal_validity, solar_clearsky_ceiling,
+    check_temporal_validity, check_input_validity, solar_clearsky_ceiling,
 )
 from datetime import datetime, timezone, timedelta
 
@@ -184,3 +184,107 @@ def test_inputs_hash_is_deterministic():
     assert c1.inputs_hash() == c2.inputs_hash()
     c3 = Claim("h", _asset(), pf, pt, 1401, 250)  # one kWh different
     assert c1.inputs_hash() != c3.inputs_hash()
+
+
+# --- input validity: figures that are not quantities ----------------------- #
+
+def test_input_validity_passes_a_normal_claim():
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(), pf, pt, 1400, 250, self_reported_intensity_gco2_kwh=180)
+    assert check_input_validity(c).status == Status.PASS
+
+
+def test_nan_energy_is_rejected_not_scored_plausible():
+    """NaN compares false against every bound, so without this check a NaN
+    claim with any CO2 figure at all scores PLAUSIBLE."""
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(), pf, pt, energy_delivered_kwh=float("nan"),
+              claimed_co2_avoided_kg=1_000_000_000)
+    v = score(c)
+    assert v.verdict == "INVALID"
+    assert v.integrity_score == 0.0
+    assert v.hardest_failure == "input_validity"
+
+
+def test_negative_energy_is_rejected():
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(), pf, pt, energy_delivered_kwh=-1400,
+              claimed_co2_avoided_kg=-250)
+    assert score(c).verdict == "INVALID"
+
+
+def test_infinite_capacity_is_rejected():
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(cap=float("inf")), pf, pt, 1e12, 1e6)
+    assert score(c).verdict == "INVALID"
+
+
+def test_zero_capacity_is_rejected():
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(cap=0), pf, pt, 1400, 250)
+    assert score(c).verdict == "INVALID"
+
+
+def test_out_of_range_latitude_is_rejected():
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(lat=999), pf, pt, 1400, 250)
+    assert score(c).verdict == "INVALID"
+
+
+def test_unknown_region_id_is_rejected():
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(region=999), pf, pt, 1400, 250)
+    assert score(c).verdict == "INVALID"
+
+
+def test_unparseable_period_is_rejected_without_raising():
+    c = Claim("x", _asset(), "garbage", "also-garbage", 1400, 250)
+    v = score(c)
+    assert v.verdict == "INVALID"
+    assert "ISO8601" in v.checks[0].detail
+
+
+# --- no live grid data means no certification ------------------------------ #
+
+def test_fetch_rejects_unknown_region_without_calling_the_api():
+    value, source = fetch_grid_intensity(999, "2026-01-01T12:00Z")
+    assert value is None
+    assert "region" in source
+
+
+def test_avoided_check_skips_when_grid_data_is_missing():
+    c = Claim("x", _asset(), "2026-01-01T12:00Z", "2026-01-01T12:30Z",
+              energy_delivered_kwh=1400, claimed_co2_avoided_kg=250)
+    r = check_avoided_emissions_bound(c, None, "live grid data unavailable (test)")
+    assert r.status == Status.SKIP
+
+
+def test_missing_grid_data_cannot_be_certified(monkeypatch):
+    """A submitter who can force the offline path must not gain a ceiling of
+    their choosing: the claim is returned UNVERIFIED, at the on-chain
+    implausibility threshold, not PLAUSIBLE."""
+    monkeypatch.setattr(
+        "veritas.engine.fetch_grid_intensity",
+        lambda region_id, period_from: (None, "live grid data unavailable (test)"),
+    )
+    pf, pt = _noon_slot()
+    c = Claim("x", _asset(), pf, pt, 1400, 250)
+    v = score(c)
+    assert v.verdict == "UNVERIFIED"
+    assert v.integrity_score <= 0.50
+    assert v.grid_intensity_used is None
+
+
+# --- soft failures must not clear the on-chain threshold ------------------- #
+
+def test_soft_failure_scores_below_the_onchain_threshold():
+    """A soft FAIL used to score 0.55 -> 5500 bps, above the program's 5000 bps
+    threshold, so a correct challenge against it would have lost."""
+    pf, pt = _noon_slot()
+    # 98% capacity factor: within the capacity ceiling, far above the clear-sky one.
+    c = Claim("x", _asset(cap=1000), pf, pt, energy_delivered_kwh=490,
+              claimed_co2_avoided_kg=80)
+    v = score(c)
+    assert v.verdict == "IMPLAUSIBLE"
+    assert v.hardest_failure == "resource_envelope"
+    assert v.integrity_score <= 0.50
