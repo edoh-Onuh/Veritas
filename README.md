@@ -24,7 +24,7 @@ Three roles, one optimistic verification loop:
 
 1. **Submitter** commits a physics-scored claim on Solana — only its hash and headline figures go on-chain (cheap); the full claim stays off-chain. A bond is staked.
 2. **Plausibility engine** scores the claim against five physics checks (below), each naming the law it enforces, using live NESO grid intensity.
-3. **Challenger** stakes to dispute a claim. Because the engine is deterministic, resolution is reproducible: an implausible claim gets slashed, the challenger is rewarded, and a portable integrity score is written for other programs to read.
+3. **Challenger** stakes to dispute a claim while its challenge window is open. The named resolver re-runs the engine on the committed inputs and settles the dispute with the score it derives: an implausible claim gets slashed, the challenger is rewarded, and a portable integrity score is written for other programs to read. A claim nobody disputes returns its bond once the window closes.
 
 **Why Solana:** attestations are per-reading and high-frequency (half-hourly settlement slots, per batch, per shipment), and the challenge game needs cheap, fast finality. At Ethereum L1 gas prices a single attestation costs more than the data point is worth. On Solana it's fractions of a cent. The economics only close on a high-throughput, low-fee chain.
 
@@ -106,7 +106,8 @@ The program is deployed on devnet at `DypSeezrbcEhDSJNganfpjjkQXp1NBAHpvDAQrQBHL
 
 These are stated plainly because scoped honesty is a strength, not a gap — and each names a real research direction:
 
-- **Optimistic trust at MVP.** `resolve` trusts that the integrity score committed at submit time was correctly derived from the committed inputs. Making the *computation itself* trustlessly verifiable on-chain — via verifiable compute, or a committee of independent re-runners — is the core post-hackathon problem, and the one this project's physics-informed background is built for.
+- **One trusted resolver at MVP.** A dispute is settled by the score a single configured resolver re-derives from the committed inputs; the submitter's own score is recorded but never decides the outcome. That moves the trust from the submitter (who profits from lying) to a named party whose work anyone can reproduce by re-running the engine — but it is still trust. Making the *computation itself* trustlessly verifiable on-chain — via verifiable compute, or a committee of independent re-runners — is the core post-hackathon problem, and the one this project's physics-informed background is built for.
+- **Liveness, not custody, is the resolver's power.** The resolver cannot take anyone's money: funds only ever go to the submitter or the challenger. If it goes quiet, anyone can refund both sides once the resolution deadline passes, so no bond or stake can be held hostage.
 - **Input attestation is a later layer.** The engine trusts the submitter's meter figures. Catching a submitter who fabricates the raw inputs (fake sensor data) is a sensor-attestation / DePIN problem layered underneath this one.
 - **Solar-only resource envelope.** Wind, hydro, and battery envelopes are stubbed as roadmap; the framework generalizes to each.
 - **One methodology.** Grid energy is the beachhead. The same commit-score-challenge loop extends to any physical claim — biochar mass balance, reforestation remote sensing, EU Digital Product Passport embedded carbon.

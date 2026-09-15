@@ -28,11 +28,13 @@ Only `inputs_hash` (sha256 of the canonically-serialized claim) plus headline fi
 
 ## Why resolution is deterministic
 
-The physics engine is a pure function: same inputs → same verdict, every time. That's what makes the challenge game work without a trusted oracle. Anyone can re-run the engine on the committed inputs and get the same score, so "was this claim implausible?" has one reproducible answer. The MVP's `resolve` checks the committed score against a threshold; the hardened version re-derives the score from inputs on-chain (see roadmap).
+The physics engine is a pure function: same inputs → same verdict, every time. Anyone can re-run the engine on the committed inputs and get the same score, so "was this claim implausible?" has one reproducible answer. The MVP's `resolve` accepts that score from a single configured resolver and checks it against the threshold; because the engine is deterministic, anybody can re-run it and see whether the resolver reported honestly. The hardened version re-derives the score from inputs on-chain, or has a committee of independent re-runners agree on it (see roadmap).
 
 ## The optimistic model
 
-Veritas assumes claims are valid and makes disputing them cheap and rewarding — the same design logic as optimistic rollups. A submitter stakes a bond; a challenger stakes to dispute; the loser's stake pays the winner. Fabrication is unprofitable in expectation as long as honest challengers watch the stream. This is deliberately simple for a four-week build and deliberately honest about it: the cryptoeconomic hardening (bond sizing, challenge windows, griefing resistance) is roadmap, not claimed as done.
+Veritas assumes claims are valid and makes disputing them cheap and rewarding — the same design logic as optimistic rollups. A submitter stakes a bond; a challenger stakes to dispute it within the challenge window; the loser's stake pays the winner. Fabrication is unprofitable in expectation as long as honest challengers watch the stream and the resolver reports the score it actually derived.
+
+Every escrow has a way out. An unchallenged bond is withdrawable by its submitter once the challenge window closes; a confirmed claim returns the bond with the challenger's stake; and a challenge the resolver leaves past its deadline can be refunded to both sides by anyone. This is deliberately simple for a four-week build and deliberately honest about it: the rest of the cryptoeconomic hardening (bond sizing, minimum stakes, griefing resistance) is roadmap, not claimed as done.
 
 ## Data source
 

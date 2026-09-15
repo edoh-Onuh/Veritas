@@ -2,26 +2,32 @@
 //!
 //! An *optimistic* verification game. A submitter commits a physics-scored
 //! claim (only its hash + headline figures go on-chain; the full claim stays
-//! off-chain and cheap). Anyone can challenge by staking; resolution is
-//! deterministic because the off-chain physics engine is deterministic — the
-//! same committed inputs always produce the same verdict.
+//! off-chain and cheap) and escrows a bond. Anyone can challenge it by staking
+//! while the challenge window is open. A challenged claim is settled by the
+//! configured resolver, who re-runs the deterministic physics engine on the
+//! committed inputs and signs the score it derives.
 //!
-//! MVP honesty: `resolve` trusts that the integrity score committed at submit
-//! time was correctly derived from the committed inputs. Making the computation
-//! itself trustlessly verifiable on-chain (verifiable compute / a committee of
-//! independent re-runners) is the core post-hackathon research problem.
+//! MVP honesty: `resolve` trusts the configured resolver's re-derived score.
+//! The submitter's own score is recorded but never decides a dispute. Replacing
+//! the single resolver with verifiable compute or a committee of independent
+//! re-runners is the core post-hackathon research problem.
 //!
-//! Built against Anchor 0.30.x. Replace the program id below with the one
-//! `anchor keys list` prints after your first build.
+//! Funds never stay locked: an unchallenged bond can be withdrawn once the
+//! challenge window closes, a confirmed claim gets its bond back at resolution,
+//! and anyone can refund both sides of a challenge the resolver leaves past its
+//! deadline.
+//!
+//! Built against Anchor 0.30.x.
 
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 
 declare_id!("DypSeezrbcEhDSJNganfpjjkQXp1NBAHpvDAQrQBHLEW");
 
-/// Scores at or below this (basis points, 0..10000) are considered implausible.
-/// 0.50 -> 5000 bps. A submitter committing a score below this is asserting
-/// their own claim is dubious, so a challenge against it will succeed.
+use crate::program::Veritas;
+
+/// Resolver scores at or below this (basis points, 0..10000) are implausible.
+/// 0.50 -> 5000 bps.
 pub const IMPLAUSIBLE_THRESHOLD_BPS: u16 = 5000;
 
 /// Minimum bond a submitter must stake (lamports). 0.05 SOL.
@@ -31,7 +37,30 @@ pub const MIN_BOND_LAMPORTS: u64 = 50_000_000;
 pub mod veritas {
     use super::*;
 
+    /// One-time setup, callable only by the program's upgrade authority: names
+    /// the resolver and sets the challenge and resolution windows.
+    pub fn initialize_config(
+        ctx: Context<InitializeConfig>,
+        resolver: Pubkey,
+        challenge_window_secs: i64,
+        resolve_window_secs: i64,
+    ) -> Result<()> {
+        require_gt!(challenge_window_secs, 0, VeritasError::BadWindow);
+        require_gt!(resolve_window_secs, 0, VeritasError::BadWindow);
+
+        let config = &mut ctx.accounts.config;
+        config.authority = ctx.accounts.authority.key();
+        config.resolver = resolver;
+        config.challenge_window_secs = challenge_window_secs;
+        config.resolve_window_secs = resolve_window_secs;
+        config.bump = ctx.bumps.config;
+        Ok(())
+    }
+
     /// Commit a physics-scored claim. Escrows `bond` in the claim PDA.
+    ///
+    /// `integrity_score_bps` is the submitter's own engine score. It is recorded
+    /// for reference; a dispute is settled by the resolver's score instead.
     pub fn submit_claim(
         ctx: Context<SubmitClaim>,
         inputs_hash: [u8; 32],
@@ -66,6 +95,7 @@ pub mod veritas {
         claim.challenger = None;
         claim.created_at = Clock::get()?.unix_timestamp;
         claim.bump = ctx.bumps.claim;
+        claim.resolved_score_bps = None;
 
         emit!(ClaimSubmitted {
             claim: claim.key(),
@@ -76,7 +106,8 @@ pub mod veritas {
         Ok(())
     }
 
-    /// Dispute a pending claim. Escrows `stake` in the challenge PDA.
+    /// Dispute a pending claim while its challenge window is open. Escrows
+    /// `stake` in the challenge PDA.
     /// `recomputed_hash` is the hash the challenger independently derived from
     /// the same off-chain claim — it must match, proving they checked the same
     /// thing (not a different claim).
@@ -85,8 +116,14 @@ pub mod veritas {
         recomputed_hash: [u8; 32],
         stake: u64,
     ) -> Result<()> {
+        let window = ctx.accounts.config.challenge_window_secs;
         let claim = &mut ctx.accounts.claim;
         require!(claim.status == ClaimStatus::Pending, VeritasError::NotChallengeable);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now <= claim.created_at.saturating_add(window),
+            VeritasError::ChallengeWindowClosed
+        );
         require!(stake > 0, VeritasError::ZeroStake);
         require!(
             recomputed_hash == claim.inputs_hash,
@@ -111,6 +148,7 @@ pub mod veritas {
         challenge.recomputed_hash = recomputed_hash;
         challenge.resolved = false;
         challenge.bump = ctx.bumps.challenge;
+        challenge.created_at = now;
 
         claim.status = ClaimStatus::Challenged;
         claim.challenger = Some(ctx.accounts.challenger.key());
@@ -123,65 +161,159 @@ pub mod veritas {
         Ok(())
     }
 
-    /// Deterministically resolve a challenged claim.
+    /// Settle a challenged claim with the score the resolver re-derived from
+    /// the committed inputs.
     ///
-    /// The chain checks the one thing it can verify cheaply: was the committed
-    /// integrity score below the implausibility threshold? Because the physics
-    /// engine is deterministic, this is reproducible by anyone.
-    ///
-    /// - implausible claim  -> submitter slashed; bond + stake go to challenger.
-    /// - claim holds up      -> challenger's stake goes to submitter; bond back.
-    pub fn resolve(ctx: Context<Resolve>) -> Result<()> {
+    /// - implausible (score <= threshold) -> bond + stake go to the challenger.
+    /// - plausible                        -> bond + stake go to the submitter.
+    pub fn resolve(ctx: Context<Resolve>, resolved_score_bps: u16) -> Result<()> {
+        require!(resolved_score_bps <= 10_000, VeritasError::BadScore);
         let claim = &mut ctx.accounts.claim;
         let challenge = &mut ctx.accounts.challenge;
         require!(claim.status == ClaimStatus::Challenged, VeritasError::NotResolvable);
         require!(!challenge.resolved, VeritasError::AlreadyResolved);
-        require!(
-            challenge.claim == claim.key(),
-            VeritasError::ChallengeMismatch
-        );
 
-        let claim_implausible =
-            claim.integrity_score_bps <= IMPLAUSIBLE_THRESHOLD_BPS;
-
-        // Lamports held in each PDA (bond in claim, stake in challenge).
-        let bond = claim.bond;
-        let stake = challenge.stake;
-
-        if claim_implausible {
-            // Submitter was lying: challenger takes bond + their stake back.
-            **claim.to_account_info().try_borrow_mut_lamports()? -= bond;
-            **ctx.accounts.challenger.to_account_info()
-                .try_borrow_mut_lamports()? += bond;
-            **challenge.to_account_info().try_borrow_mut_lamports()? -= stake;
-            **ctx.accounts.challenger.to_account_info()
-                .try_borrow_mut_lamports()? += stake;
-            claim.status = ClaimStatus::Slashed;
+        let slashed = resolved_score_bps <= IMPLAUSIBLE_THRESHOLD_BPS;
+        let (bond, stake) = (claim.bond, challenge.stake);
+        let winner = if slashed {
+            ctx.accounts.challenger.to_account_info()
         } else {
-            // Claim holds: submitter keeps bond, takes challenger's stake.
-            **challenge.to_account_info().try_borrow_mut_lamports()? -= stake;
-            **ctx.accounts.submitter.to_account_info()
-                .try_borrow_mut_lamports()? += stake;
-            // bond stays in the claim PDA and is reclaimable by submitter later
-            claim.status = ClaimStatus::Confirmed;
-        }
+            ctx.accounts.submitter.to_account_info()
+        };
+        move_lamports(&claim.to_account_info(), &winner, bond)?;
+        move_lamports(&challenge.to_account_info(), &winner, stake)?;
 
+        claim.status = if slashed {
+            ClaimStatus::Slashed
+        } else {
+            ClaimStatus::Confirmed
+        };
         claim.bond = 0;
+        claim.resolved_score_bps = Some(resolved_score_bps);
         challenge.stake = 0;
         challenge.resolved = true;
 
         emit!(ClaimResolved {
             claim: claim.key(),
-            slashed: claim_implausible,
-            final_score_bps: claim.integrity_score_bps,
+            slashed,
+            submitted_score_bps: claim.integrity_score_bps,
+            final_score_bps: resolved_score_bps,
+        });
+        Ok(())
+    }
+
+    /// Return the bond of a claim nobody challenged before its window closed.
+    pub fn withdraw_bond(ctx: Context<WithdrawBond>) -> Result<()> {
+        let window = ctx.accounts.config.challenge_window_secs;
+        let claim = &mut ctx.accounts.claim;
+        require!(claim.status == ClaimStatus::Pending, VeritasError::NotWithdrawable);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now > claim.created_at.saturating_add(window),
+            VeritasError::ChallengeWindowOpen
+        );
+
+        let bond = claim.bond;
+        move_lamports(
+            &claim.to_account_info(),
+            &ctx.accounts.submitter.to_account_info(),
+            bond,
+        )?;
+        claim.bond = 0;
+        claim.status = ClaimStatus::Finalized;
+
+        emit!(BondWithdrawn {
+            claim: claim.key(),
+            submitter: claim.submitter,
+            amount: bond,
+        });
+        Ok(())
+    }
+
+    /// Refund both sides of a challenge the resolver did not settle before its
+    /// deadline. Anyone can crank this.
+    pub fn refund_expired_challenge(ctx: Context<RefundExpiredChallenge>) -> Result<()> {
+        let window = ctx.accounts.config.resolve_window_secs;
+        let claim = &mut ctx.accounts.claim;
+        let challenge = &mut ctx.accounts.challenge;
+        require!(claim.status == ClaimStatus::Challenged, VeritasError::NotResolvable);
+        require!(!challenge.resolved, VeritasError::AlreadyResolved);
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now > challenge.created_at.saturating_add(window),
+            VeritasError::ResolveWindowOpen
+        );
+
+        let (bond, stake) = (claim.bond, challenge.stake);
+        move_lamports(
+            &claim.to_account_info(),
+            &ctx.accounts.submitter.to_account_info(),
+            bond,
+        )?;
+        move_lamports(
+            &challenge.to_account_info(),
+            &ctx.accounts.challenger.to_account_info(),
+            stake,
+        )?;
+
+        claim.bond = 0;
+        claim.status = ClaimStatus::Unresolved;
+        challenge.stake = 0;
+        challenge.resolved = true;
+
+        emit!(ChallengeRefunded {
+            claim: claim.key(),
+            submitter: claim.submitter,
+            challenger: challenge.challenger,
+            bond,
+            stake,
         });
         Ok(())
     }
 }
 
+/// Move lamports out of a program-owned account. Each balance is borrowed only
+/// for its own update, so `from` and `to` may be the same account.
+fn move_lamports(from: &AccountInfo, to: &AccountInfo, amount: u64) -> Result<()> {
+    let from_balance = from.lamports();
+    **from.try_borrow_mut_lamports()? = from_balance
+        .checked_sub(amount)
+        .ok_or(VeritasError::InsufficientFunds)?;
+    let to_balance = to.lamports();
+    **to.try_borrow_mut_lamports()? = to_balance
+        .checked_add(amount)
+        .ok_or(VeritasError::InsufficientFunds)?;
+    Ok(())
+}
+
 // --------------------------------------------------------------------------- //
 // Accounts
 // --------------------------------------------------------------------------- //
+
+#[derive(Accounts)]
+pub struct InitializeConfig<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        init,
+        payer = authority,
+        space = Config::SPACE,
+        seeds = [b"config"],
+        bump
+    )]
+    pub config: Account<'info, Config>,
+    #[account(
+        constraint = program.programdata_address()? == Some(program_data.key())
+            @ VeritasError::Unauthorized
+    )]
+    pub program: Program<'info, Veritas>,
+    #[account(
+        constraint = program_data.upgrade_authority_address == Some(authority.key())
+            @ VeritasError::Unauthorized
+    )]
+    pub program_data: Account<'info, ProgramData>,
+    pub system_program: Program<'info, System>,
+}
 
 #[derive(Accounts)]
 #[instruction(inputs_hash: [u8; 32])]
@@ -203,6 +335,8 @@ pub struct SubmitClaim<'info> {
 pub struct ChallengeClaim<'info> {
     #[account(mut)]
     pub challenger: Signer<'info>,
+    #[account(seeds = [b"config"], bump = config.bump)]
+    pub config: Account<'info, Config>,
     #[account(mut)]
     pub claim: Account<'info, Claim>,
     #[account(
@@ -218,8 +352,14 @@ pub struct ChallengeClaim<'info> {
 
 #[derive(Accounts)]
 pub struct Resolve<'info> {
-    /// Anyone can crank resolution; it's deterministic.
-    pub cranker: Signer<'info>,
+    /// The configured resolver, who re-derived the score from the committed inputs.
+    pub resolver: Signer<'info>,
+    #[account(
+        seeds = [b"config"],
+        bump = config.bump,
+        has_one = resolver @ VeritasError::Unauthorized,
+    )]
+    pub config: Account<'info, Config>,
     #[account(
         mut,
         seeds = [b"claim", claim.submitter.as_ref(), claim.inputs_hash.as_ref()],
@@ -233,7 +373,7 @@ pub struct Resolve<'info> {
         constraint = challenge.claim == claim.key() @ VeritasError::ChallengeMismatch,
     )]
     pub challenge: Account<'info, Challenge>,
-    /// CHECK: validated to equal claim.submitter; receives refunded stake/bond.
+    /// CHECK: validated to equal claim.submitter; receives funds if the claim holds.
     #[account(mut, address = claim.submitter @ VeritasError::WrongSubmitter)]
     pub submitter: UncheckedAccount<'info>,
     /// CHECK: validated to equal the recorded challenger; receives slashed funds.
@@ -243,41 +383,100 @@ pub struct Resolve<'info> {
     pub challenger: UncheckedAccount<'info>,
 }
 
+#[derive(Accounts)]
+pub struct WithdrawBond<'info> {
+    #[account(mut)]
+    pub submitter: Signer<'info>,
+    #[account(seeds = [b"config"], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        mut,
+        seeds = [b"claim", submitter.key().as_ref(), claim.inputs_hash.as_ref()],
+        bump = claim.bump,
+        has_one = submitter @ VeritasError::WrongSubmitter,
+    )]
+    pub claim: Account<'info, Claim>,
+}
+
+#[derive(Accounts)]
+pub struct RefundExpiredChallenge<'info> {
+    /// Anyone can crank a refund once the resolution deadline has passed.
+    pub cranker: Signer<'info>,
+    #[account(seeds = [b"config"], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        mut,
+        seeds = [b"claim", claim.submitter.as_ref(), claim.inputs_hash.as_ref()],
+        bump = claim.bump,
+    )]
+    pub claim: Account<'info, Claim>,
+    #[account(
+        mut,
+        seeds = [b"challenge", claim.key().as_ref()],
+        bump = challenge.bump,
+        constraint = challenge.claim == claim.key() @ VeritasError::ChallengeMismatch,
+    )]
+    pub challenge: Account<'info, Challenge>,
+    /// CHECK: validated to equal claim.submitter; receives the refunded bond.
+    #[account(mut, address = claim.submitter @ VeritasError::WrongSubmitter)]
+    pub submitter: UncheckedAccount<'info>,
+    /// CHECK: validated to equal the recorded challenger; receives the refunded stake.
+    #[account(mut, address = challenge.challenger @ VeritasError::WrongChallenger)]
+    pub challenger: UncheckedAccount<'info>,
+}
+
 // --------------------------------------------------------------------------- //
 // State
 // --------------------------------------------------------------------------- //
 
 #[account]
-pub struct Claim {
-    pub submitter: Pubkey,          // 32
-    pub inputs_hash: [u8; 32],      // 32
-    pub model_version: u32,         // 4
-    pub claimed_co2_kg: u64,        // 8
-    pub integrity_score_bps: u16,   // 2
-    pub bond: u64,                  // 8
-    pub status: ClaimStatus,        // 1 + 0 (enum, C-like)
-    pub challenger: Option<Pubkey>, // 1 + 32
-    pub created_at: i64,            // 8
+pub struct Config {
+    pub authority: Pubkey,          // 32
+    pub resolver: Pubkey,           // 32
+    pub challenge_window_secs: i64, // 8
+    pub resolve_window_secs: i64,   // 8
     pub bump: u8,                   // 1
+}
+
+impl Config {
+    // 8 discriminator + fields, padded generously.
+    pub const SPACE: usize = 8 + 32 + 32 + 8 + 8 + 1 + 16;
+}
+
+#[account]
+pub struct Claim {
+    pub submitter: Pubkey,               // 32
+    pub inputs_hash: [u8; 32],           // 32
+    pub model_version: u32,              // 4
+    pub claimed_co2_kg: u64,             // 8
+    pub integrity_score_bps: u16,        // 2
+    pub bond: u64,                       // 8
+    pub status: ClaimStatus,             // 1 + 0 (enum, C-like)
+    pub challenger: Option<Pubkey>,      // 1 + 32
+    pub created_at: i64,                 // 8
+    pub bump: u8,                        // 1
+    pub resolved_score_bps: Option<u16>, // 1 + 2
 }
 
 impl Claim {
     // 8 discriminator + fields, padded generously.
-    pub const SPACE: usize = 8 + 32 + 32 + 4 + 8 + 2 + 8 + 1 + (1 + 32) + 8 + 1 + 16;
+    pub const SPACE: usize =
+        8 + 32 + 32 + 4 + 8 + 2 + 8 + 1 + (1 + 32) + 8 + 1 + (1 + 2) + 16;
 }
 
 #[account]
 pub struct Challenge {
-    pub claim: Pubkey,              // 32
-    pub challenger: Pubkey,         // 32
+    pub claim: Pubkey,             // 32
+    pub challenger: Pubkey,        // 32
     pub stake: u64,                // 8
     pub recomputed_hash: [u8; 32], // 32
     pub resolved: bool,            // 1
     pub bump: u8,                  // 1
+    pub created_at: i64,           // 8
 }
 
 impl Challenge {
-    pub const SPACE: usize = 8 + 32 + 32 + 8 + 32 + 1 + 1 + 8;
+    pub const SPACE: usize = 8 + 32 + 32 + 8 + 32 + 1 + 1 + 8 + 8;
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq)]
@@ -286,6 +485,10 @@ pub enum ClaimStatus {
     Challenged,
     Confirmed,
     Slashed,
+    /// Unchallenged when its window closed; the bond has been withdrawn.
+    Finalized,
+    /// The resolver missed its deadline; both sides were refunded.
+    Unresolved,
 }
 
 // --------------------------------------------------------------------------- //
@@ -311,7 +514,24 @@ pub struct ClaimChallenged {
 pub struct ClaimResolved {
     pub claim: Pubkey,
     pub slashed: bool,
+    pub submitted_score_bps: u16,
     pub final_score_bps: u16,
+}
+
+#[event]
+pub struct BondWithdrawn {
+    pub claim: Pubkey,
+    pub submitter: Pubkey,
+    pub amount: u64,
+}
+
+#[event]
+pub struct ChallengeRefunded {
+    pub claim: Pubkey,
+    pub submitter: Pubkey,
+    pub challenger: Pubkey,
+    pub bond: u64,
+    pub stake: u64,
 }
 
 // --------------------------------------------------------------------------- //
@@ -340,4 +560,18 @@ pub enum VeritasError {
     WrongSubmitter,
     #[msg("Challenger account does not match the claim")]
     WrongChallenger,
+    #[msg("Signer is not authorized for this action")]
+    Unauthorized,
+    #[msg("Windows must be longer than zero seconds")]
+    BadWindow,
+    #[msg("The challenge window for this claim has closed")]
+    ChallengeWindowClosed,
+    #[msg("The challenge window for this claim is still open")]
+    ChallengeWindowOpen,
+    #[msg("The resolver's deadline for this challenge has not passed")]
+    ResolveWindowOpen,
+    #[msg("Only an unchallenged claim's bond can be withdrawn")]
+    NotWithdrawable,
+    #[msg("Account balance is too low for this transfer")]
+    InsufficientFunds,
 }
