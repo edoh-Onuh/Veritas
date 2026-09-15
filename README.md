@@ -99,12 +99,15 @@ anchor deploy --provider.cluster devnet
 ```
 
 The program is deployed on devnet at `DypSeezrbcEhDSJNganfpjjkQXp1NBAHpvDAQrQBHLEW`, with its `Config` PDA at
-`2AnEsswMzNfhLkqRWj84vGp5ucsfe4Zx2CwkBgPA2xs4`: resolver `3HdgSu5vgpAq7MbZmLRtraQ6ZhCyzw2trfaK8CQtgUYP`, a 24h
-challenge window and a 72h resolution deadline. `initialize_config` and `set_resolver` are gated on the program's
-upgrade authority, so a fresh deployment names its own resolver.
+`7ygKX1VDHgseUSggX23tcQLvx8MUVhX4g3geDqR2K582`: a one-member committee (`3HdgSu5vgpAq7MbZmLRtraQ6ZhCyzw2trfaK8CQtgUYP`,
+quorum 1) with a 24h challenge window and a 72h resolution deadline. One member is the weakest a committee can be —
+`set_resolvers` adds independent re-runners without redeploying. A demo asset is registered at
+`BWfN3N83CM8HT8X7p9QKaFp8To7ZazUcZ4BrebU9TdAz` (5 MW solar, DNO region 3, lat 53.5): 5 MW solar, asset id
+`01a27315adfb575973486b4afa1d42b2b286c274ead2762b6cd65ab19807bc80`.
 
 Building your own deployment? Run `anchor keys list`, put your id in `declare_id!` and `Anchor.toml`, then call
-`initialize_config` once before any claim can be challenged.
+`initialize_config` once, and `register_asset` for each asset, before any claim can be submitted or challenged.
+`initialize_config`, `set_resolvers` and `register_asset` are all gated on the program's upgrade authority.
 
 `Cargo.lock` is resolved for the Rust 1.75 compiler inside Solana 1.18's platform-tools, with `blake3 1.8.2`, `jobserver 0.1.32` and `proc-macro2 1.0.94` pinned. Don't `cargo update` it.
 
