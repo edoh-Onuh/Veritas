@@ -501,46 +501,81 @@ def score(claim: Claim) -> Verdict:
 # Demo fixtures — the good claim / bad claims that carry the pitch video
 # --------------------------------------------------------------------------- #
 
-def _recent_slot() -> tuple[str, str]:
-    """A settlement slot ~2 hours in the past, aligned to :00/:30, so live grid
-    'actual' data exists for it."""
+# Used only to shape the demo fixtures when the live API is unreachable, never
+# to score a claim: a claim scored without live data comes back UNVERIFIED.
+_NOMINAL_DEMO_INTENSITY = 180.0
+
+
+def _recent_daylight_slot(latitude: float) -> tuple[str, str, float]:
+    """The most recent finished settlement slot with the sun up, and its ceiling.
+
+    The demo's plausible claim has to be plausible *today*. A fixed 56% capacity
+    factor is honest at midsummer noon and impossible at 3am in December, so the
+    fixture sizes itself to the sun that was actually up: this walks back in
+    half-hour steps and returns the best slot within the last day.
+    """
+    from datetime import timedelta
     now = datetime.now(timezone.utc)
     slot = now.replace(minute=0 if now.minute < 30 else 30, second=0, microsecond=0)
-    # step back a few hours to be safely in the past with published data
-    from datetime import timedelta
-    slot = slot - timedelta(hours=3)
-    return (slot.strftime("%Y-%m-%dT%H:%MZ"),
-            (slot + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%MZ"))
+    slot -= timedelta(hours=1)  # a finished slot, with published grid data
+    best_slot, best_ceiling = slot, 0.0
+    for _ in range(48):  # a full day back
+        ceiling = solar_clearsky_ceiling(latitude, slot)
+        if ceiling > best_ceiling:
+            best_slot, best_ceiling = slot, ceiling
+        if ceiling >= 0.35:  # good enough sun; stop at the most recent such slot
+            break
+        slot -= timedelta(minutes=30)
+    return (best_slot.strftime("%Y-%m-%dT%H:%MZ"),
+            (best_slot + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%MZ"),
+            best_ceiling)
 
 
 def demo_claims() -> list[tuple[str, Claim]]:
-    pf, pt = _recent_slot()
+    """Three fixtures sized against the real sun and the live grid.
+
+    The figures are derived rather than hard-coded: the plausible claim asks for
+    what this asset could actually have produced in that slot, and for what that
+    energy could actually have displaced at the intensity the grid was running
+    at. A hard-coded 250 kg is plausible against a dirty grid and impossible
+    against a clean one, which would make the demo lie on a windy afternoon.
+    """
     # A 5 MW solar farm in NW England (region 3), lat ~53.5
     base_asset = Asset(AssetType.SOLAR_PV, 5000, region_id=3,
                        latitude=53.5, location_hint="North West England")
+    pf, pt, ceiling = _recent_daylight_slot(base_asset.latitude)
+    live_intensity, _ = fetch_grid_intensity(base_asset.region_id, pf)
+    intensity = live_intensity if live_intensity is not None else _NOMINAL_DEMO_INTENSITY
+
+    max_energy = base_asset.nameplate_capacity_kw * _PERIOD_HOURS
+    plausible_energy = round(max_energy * min(ceiling, 0.9) * 0.9)
+    carbon_ceiling_kg = plausible_energy * intensity / 1000.0
 
     good = Claim(
         submitter="Ver1tasDemoGoodpubkey1111111111111111111111",
         asset=base_asset, period_from=pf, period_to=pt,
-        energy_delivered_kwh=1400,          # ~56% CF — plausible for good midday sun
-        claimed_co2_avoided_kg=250,         # will be checked against live grid
-        self_reported_intensity_gco2_kwh=180,
+        energy_delivered_kwh=plausible_energy,       # within this slot's clear-sky ceiling
+        claimed_co2_avoided_kg=round(carbon_ceiling_kg * 0.97),  # just inside the live ceiling
+        self_reported_intensity_gco2_kwh=intensity,
     )
 
-    # Fraud 1: physically impossible energy (128% capacity factor)
+    # Fraud 1: physically impossible energy (128% capacity factor). Its carbon
+    # figure is honest *for that energy*, so the capacity ceiling is the only
+    # law it breaks.
+    impossible_kwh = round(max_energy * 1.28)
     impossible_energy = Claim(
         submitter="Ver1tasDemoBad1pubkey11111111111111111111111",
         asset=base_asset, period_from=pf, period_to=pt,
-        energy_delivered_kwh=3200,          # 128% CF — impossible
-        claimed_co2_avoided_kg=500,
+        energy_delivered_kwh=impossible_kwh,
+        claimed_co2_avoided_kg=round(impossible_kwh * intensity / 1000.0 * 0.9),
     )
 
     # Fraud 2: plausible energy, inflated carbon (the common real fraud)
     inflated_carbon = Claim(
         submitter="Ver1tasDemoBad2pubkey11111111111111111111111",
         asset=base_asset, period_from=pf, period_to=pt,
-        energy_delivered_kwh=1400,          # fine
-        claimed_co2_avoided_kg=1800,        # way above grid-intensity ceiling
+        energy_delivered_kwh=plausible_energy,            # fine
+        claimed_co2_avoided_kg=round(carbon_ceiling_kg * 6),  # six times the live ceiling
     )
 
     return [

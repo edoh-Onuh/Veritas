@@ -300,7 +300,7 @@
  * Wiring points are marked ★.
  * ------------------------------------------------------------------ */
 
-const GRID = 180;            // gCO2/kWh — live NESO value in production
+const GRID = 180;            // gCO2/kWh — the value recorded when these cases were run
 const PROGRAM = "DypSeezrbcEhDSJNganfpjjkQXp1NBAHpvDAQrQBHLEW";
 
 // helper: fabricate a realistic-looking devnet signature for the demo
@@ -322,6 +322,7 @@ const CASES = {
     ],
     hash: "ba1336b2a3e2242f9c07…d81f",
     checks: [
+      ["input_validity","inputs must be finite, non-negative physical quantities","all figures finite, non-negative and within range","pass"],
       ["temporal_validity","settlement-slot alignment & past-dated","valid past-dated 30-min settlement slot","pass"],
       ["capacity_ceiling","conservation of energy · output ≤ capacity × time","implied capacity factor 56% ≤ 100%","pass"],
       ["resource_envelope","solar irradiance limit · clear-sky ceiling","solar CF 56% within clear-sky ceiling 56%","pass"],
@@ -342,10 +343,11 @@ const CASES = {
     ],
     hash: "bea5fb3d88e55daa1c44…09ae",
     checks: [
+      ["input_validity","inputs must be finite, non-negative physical quantities","all figures finite, non-negative and within range","pass"],
       ["temporal_validity","settlement-slot alignment & past-dated","valid past-dated 30-min settlement slot","pass"],
       ["capacity_ceiling","conservation of energy · output ≤ capacity × time","implied capacity factor 128% exceeds physical maximum 100% (3200 kWh vs 2500 kWh max for a 5 MW asset in 30 min)","fail"],
       ["resource_envelope","solar irradiance limit · clear-sky ceiling","solar CF 128% exceeds clear-sky ceiling 56%","fail"],
-      ["avoided_emissions_bound","avoided CO₂ ≤ energy × grid intensity","not reached — hard failure upstream","skip"],
+      ["avoided_emissions_bound","avoided CO₂ ≤ energy × grid intensity","claimed 500 kg ≤ ceiling 576 kg at grid 180 gCO₂/kWh","pass"],
       ["internal_consistency","dimensional consistency","no self-reported intensity supplied","skip"],
     ],
     verdict: "IMPOSSIBLE", score: "0.15",
@@ -362,6 +364,7 @@ const CASES = {
     ],
     hash: "3ba0870a30542795745…a1d",
     checks: [
+      ["input_validity","inputs must be finite, non-negative physical quantities","all figures finite, non-negative and within range","pass"],
       ["temporal_validity","settlement-slot alignment & past-dated","valid past-dated 30-min settlement slot","pass"],
       ["capacity_ceiling","conservation of energy · output ≤ capacity × time","implied capacity factor 56% ≤ 100%","pass"],
       ["resource_envelope","solar irradiance limit · clear-sky ceiling","solar CF 56% within clear-sky ceiling 56%","pass"],
@@ -488,13 +491,13 @@ async function chainSequence(c) {
 
   await wait(700);
 
-  // 3. resolve  ★ program.methods.resolve().rpc()
+  // 3. submit_resolution  ★ program.methods.submitResolution(scoreBps).rpc()
   const s3 = sig();
   const res = txRow(slash ? "slash" : "done",
-    "resolve",
+    "submit_resolution",
     slash
-      ? `score 0.15 ≤ threshold 0.50 → claim slashed`
-      : `score 0.95 > threshold 0.50 → claim confirmed`,
+      ? `committee quorum re-derives 0.15 ≤ threshold 0.50 → claim slashed`
+      : `committee quorum re-derives 0.95 > threshold 0.50 → claim confirmed`,
     s3);
   list.appendChild(res);
   await reveal(res);
@@ -504,10 +507,10 @@ async function chainSequence(c) {
   const st = $("#settle");
   if (slash) {
     st.className = "settle slashed shown";
-    st.innerHTML = `<b>Slashed.</b>&nbsp; The fabricated claim's 0.10 SOL bond transfers to the challenger. The claim never enters the market.`;
+    st.innerHTML = `<b>Slashed.</b>&nbsp; A quorum of the committee re-derived the same score, so the fabricated claim's 0.10 SOL bond transfers to the challenger. The claim never enters the market.`;
   } else {
     st.className = "settle confirmed shown";
-    st.innerHTML = `<b>Confirmed.</b>&nbsp; The claim survived challenge. Its integrity score is now readable on-chain by any consuming market.`;
+    st.innerHTML = `<b>Confirmed.</b>&nbsp; The claim survived challenge: the committee agreed it holds. Its integrity score is now readable on-chain by any consuming market.`;
   }
 }
 
@@ -532,7 +535,7 @@ $("#run").onclick = run;
 /* footer */
 $("#footer").innerHTML =
   `program ${PROGRAM.slice(0,10)}… on devnet · grid data: UK Carbon Intensity API (NESO, CC BY 4.0)<br>` +
-  `<b>demo note:</b> verdicts mirror the Python engine exactly; on-chain signatures are simulated for a zero-setup demo. Wiring points for real Anchor calls are marked ★ in source.`;
+  `<b>demo note:</b> a recorded engine run against a grid at 180 gCO₂/kWh — the live engine re-scores every claim against current intensity, so its figures move. On-chain signatures are simulated for a zero-setup demo; wiring points for real Anchor calls are marked ★ in source.`;
 
 loadCase();
 </script>
