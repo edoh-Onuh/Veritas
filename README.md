@@ -96,7 +96,13 @@ anchor test --provider.cluster localnet      # local validator: submit → chall
 anchor deploy --provider.cluster devnet
 ```
 
-The program is deployed on devnet at `DypSeezrbcEhDSJNganfpjjkQXp1NBAHpvDAQrQBHLEW`. Building your own deployment? Run `anchor keys list` and put your id in `declare_id!` and `Anchor.toml`.
+The program is deployed on devnet at `DypSeezrbcEhDSJNganfpjjkQXp1NBAHpvDAQrQBHLEW`, with its `Config` PDA at
+`2AnEsswMzNfhLkqRWj84vGp5ucsfe4Zx2CwkBgPA2xs4`: resolver `3HdgSu5vgpAq7MbZmLRtraQ6ZhCyzw2trfaK8CQtgUYP`, a 24h
+challenge window and a 72h resolution deadline. `initialize_config` and `set_resolver` are gated on the program's
+upgrade authority, so a fresh deployment names its own resolver.
+
+Building your own deployment? Run `anchor keys list`, put your id in `declare_id!` and `Anchor.toml`, then call
+`initialize_config` once before any claim can be challenged.
 
 `Cargo.lock` is resolved for the Rust 1.75 compiler inside Solana 1.18's platform-tools, with `blake3 1.8.2`, `jobserver 0.1.32` and `proc-macro2 1.0.94` pinned. Don't `cargo update` it.
 
