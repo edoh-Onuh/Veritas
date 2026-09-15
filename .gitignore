@@ -1,0 +1,28 @@
+# Rust / Anchor
+target/
+.anchor/
+**/*.rs.bk
+test-ledger/
+
+# Node
+node_modules/
+dist/
+yarn-error.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Solana keys — never commit
+*.json
+!package.json
+!tsconfig.json
+!Anchor.toml
+.env
+
+# Local build notes for Claude Code - not published
+claude.md

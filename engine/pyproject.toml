@@ -1,0 +1,13 @@
+[project]
+name = "veritas-engine"
+version = "0.1.0"
+description = "Physics-informed plausibility engine for clean-energy carbon claims"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

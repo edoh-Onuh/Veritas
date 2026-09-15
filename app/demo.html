@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Veritas — plausibility instrument</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink:        #10151d;   /* instrument housing */
+    --ink-2:      #171e29;   /* raised panel */
+    --ink-3:      #1f2836;   /* hairline / inset */
+    --line:       #2b3646;
+    --paper:      #f3f5f7;   /* readout surface */
+    --paper-dim:  #aeb9c7;   /* secondary text on ink */
+    --paper-mute: #6b7787;   /* tertiary */
+    --signal:     #f0a834;   /* instrument amber — physics readouts */
+    --pass:       #3fb98a;   /* verdict pass */
+    --fail:       #e5544b;   /* verdict fail */
+    --sans: 'Inter', system-ui, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--ink);
+    color: var(--paper);
+    font-family: var(--sans);
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    padding: clamp(20px, 5vw, 56px) clamp(16px, 4vw, 40px) 80px;
+  }
+
+  .wrap { max-width: 940px; margin: 0 auto; }
+
+  /* ---- masthead ---- */
+  header { margin-bottom: 40px; }
+  .mark {
+    display: flex; align-items: baseline; gap: 14px;
+    border-bottom: 1px solid var(--line);
+    padding-bottom: 18px;
+  }
+  .mark h1 {
+    font-size: 25px; font-weight: 700; letter-spacing: -0.02em;
+  }
+  .mark .v {
+    font-family: var(--mono); font-size: 12px; color: var(--signal);
+    border: 1px solid var(--line); border-radius: 4px;
+    padding: 2px 7px;
+  }
+  .mark .net {
+    margin-left: auto; font-family: var(--mono); font-size: 12px;
+    color: var(--paper-mute); display: flex; align-items: center; gap: 7px;
+  }
+  .net .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--pass); box-shadow: 0 0 0 3px rgba(63,185,138,.15);
+  }
+  .tagline {
+    margin-top: 16px; color: var(--paper-dim); font-size: 15px;
+    max-width: 64ch;
+  }
+  .tagline b { color: var(--paper); font-weight: 600; }
+
+  /* ---- claim selector ---- */
+  .selector {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 10px; margin: 34px 0 26px;
+  }
+  @media (max-width: 640px) { .selector { grid-template-columns: 1fr; } }
+  .case {
+    text-align: left; cursor: pointer; background: var(--ink-2);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 15px; color: var(--paper-dim);
+    transition: border-color .15s, background .15s, transform .1s;
+    font-family: inherit;
+  }
+  .case:hover { border-color: #3a4759; }
+  .case:active { transform: translateY(1px); }
+  .case.active { border-color: var(--signal); background: #1c2534; }
+  .case .k {
+    font-family: var(--mono); font-size: 11px; color: var(--paper-mute);
+    display: block; margin-bottom: 6px;
+  }
+  .case .t { font-size: 14px; font-weight: 600; color: var(--paper); }
+  .case.active .t { color: var(--paper); }
+  .case .d { font-size: 12.5px; margin-top: 3px; color: var(--paper-mute); }
+  .case:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+
+  /* ---- bench: the instrument readout ---- */
+  .bench {
+    background: var(--ink-2); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden;
+  }
+  .bench-head {
+    display: flex; align-items: center; gap: 16px;
+    padding: 16px 20px; border-bottom: 1px solid var(--ink-3);
+    background: linear-gradient(180deg, #19212d, #171e29);
+  }
+  .bench-head .spec {
+    font-family: var(--mono); font-size: 12.5px; color: var(--paper-dim);
+  }
+  .bench-head .spec b { color: var(--paper); font-weight: 500; }
+  .runbtn {
+    margin-left: auto; font-family: inherit; font-weight: 600; font-size: 14px;
+    background: var(--signal); color: #241a05; border: none;
+    padding: 9px 18px; border-radius: 7px; cursor: pointer;
+    transition: filter .15s, transform .1s;
+  }
+  .runbtn:hover { filter: brightness(1.07); }
+  .runbtn:active { transform: translateY(1px); }
+  .runbtn:disabled { opacity: .5; cursor: default; }
+  .runbtn:focus-visible { outline: 2px solid var(--paper); outline-offset: 2px; }
+
+  /* claim figures strip */
+  .figures {
+    display: flex; flex-wrap: wrap; gap: 26px;
+    padding: 16px 20px; border-bottom: 1px solid var(--ink-3);
+  }
+  .fig .fl { font-size: 11.5px; color: var(--paper-mute); margin-bottom: 3px; }
+  .fig .fv { font-family: var(--mono); font-size: 15px; color: var(--paper); }
+  .fig .fv .u { color: var(--paper-mute); font-size: 12px; }
+
+  /* checks list */
+  .checks { padding: 8px 0; }
+  .check {
+    display: grid; grid-template-columns: 26px 1fr auto;
+    align-items: start; gap: 14px;
+    padding: 13px 20px;
+    border-bottom: 1px solid rgba(43,54,70,.4);
+    opacity: 0; transform: translateY(4px);
+  }
+  .check:last-child { border-bottom: none; }
+  .check.shown { opacity: 1; transform: none; transition: opacity .3s, transform .3s; }
+  .badge {
+    width: 22px; height: 22px; border-radius: 5px; margin-top: 1px;
+    display: grid; place-items: center;
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    border: 1px solid transparent;
+  }
+  .badge.pass { color: var(--pass); border-color: rgba(63,185,138,.35); background: rgba(63,185,138,.08); }
+  .badge.fail { color: var(--fail); border-color: rgba(229,84,75,.4); background: rgba(229,84,75,.1); }
+  .badge.skip { color: var(--paper-mute); border-color: var(--line); }
+  .check .name { font-size: 14.5px; font-weight: 600; color: var(--paper); }
+  .check .law {
+    font-family: var(--mono); font-size: 11.5px; color: var(--signal);
+    margin-top: 2px;
+  }
+  .check .detail {
+    font-size: 13px; color: var(--paper-dim); margin-top: 5px;
+    max-width: 62ch;
+  }
+  .check .verdict-tag {
+    font-family: var(--mono); font-size: 11px; font-weight: 600;
+    padding: 3px 8px; border-radius: 4px; white-space: nowrap;
+  }
+  .verdict-tag.pass { color: var(--pass); background: rgba(63,185,138,.1); }
+  .verdict-tag.fail { color: var(--fail); background: rgba(229,84,75,.12); }
+  .verdict-tag.skip { color: var(--paper-mute); background: var(--ink-3); }
+
+  /* grid-intensity note */
+  .gridnote {
+    padding: 12px 20px; font-size: 12.5px; color: var(--paper-mute);
+    font-family: var(--mono); border-top: 1px solid var(--ink-3);
+    display: none;
+  }
+  .gridnote.shown { display: block; }
+  .gridnote b { color: var(--signal); }
+
+  /* ---- verdict panel ---- */
+  .verdict {
+    display: none; margin-top: 2px;
+    padding: 20px; border-top: 2px solid var(--ink-3);
+    background: var(--ink);
+  }
+  .verdict.shown { display: block; }
+  .verdict-row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .stamp {
+    font-weight: 700; font-size: 22px; letter-spacing: -0.01em;
+    padding: 8px 16px; border-radius: 8px; border: 1.5px solid;
+  }
+  .stamp.PLAUSIBLE { color: var(--pass); border-color: rgba(63,185,138,.5); background: rgba(63,185,138,.07); }
+  .stamp.IMPOSSIBLE { color: var(--fail); border-color: rgba(229,84,75,.5); background: rgba(229,84,75,.07); }
+  .score {
+    font-family: var(--mono); font-size: 13px; color: var(--paper-dim);
+  }
+  .score .n { color: var(--paper); font-size: 20px; font-weight: 600; }
+
+  /* ---- on-chain sequence ---- */
+  .chain {
+    margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--ink-3);
+  }
+  .chain-title {
+    font-size: 12px; color: var(--paper-mute); margin-bottom: 12px;
+    font-family: var(--mono);
+  }
+  .tx {
+    display: grid; grid-template-columns: 22px 1fr; gap: 12px;
+    padding: 9px 0; opacity: 0; transform: translateY(3px);
+  }
+  .tx.shown { opacity: 1; transform: none; transition: opacity .3s, transform .3s; }
+  .tx .ic {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 1.5px solid var(--line); display: grid; place-items: center;
+    font-size: 11px; color: var(--paper-mute); margin-top: 1px;
+  }
+  .tx.done .ic { border-color: var(--pass); color: var(--pass); }
+  .tx.slash .ic { border-color: var(--fail); color: var(--fail); }
+  .tx .body { font-size: 13.5px; }
+  .tx .act { font-weight: 600; color: var(--paper); }
+  .tx .meta { font-family: var(--mono); font-size: 12px; color: var(--paper-mute); margin-top: 3px; }
+  .tx .meta a { color: var(--signal); text-decoration: none; border-bottom: 1px solid rgba(240,168,52,.3); }
+  .tx .meta a:hover { border-bottom-color: var(--signal); }
+  .settle {
+    margin-top: 12px; padding: 12px 14px; border-radius: 8px;
+    font-size: 13.5px; display: none; align-items: center; gap: 10px;
+  }
+  .settle.shown { display: flex; }
+  .settle.confirmed { background: rgba(63,185,138,.08); border: 1px solid rgba(63,185,138,.3); }
+  .settle.slashed { background: rgba(229,84,75,.09); border: 1px solid rgba(229,84,75,.35); }
+  .settle b { font-weight: 600; }
+  .settle.confirmed b { color: var(--pass); }
+  .settle.slashed b { color: var(--fail); }
+
+  .cursor { display: inline-block; width: 8px; height: 15px; background: var(--signal);
+    animation: blink 1s step-end infinite; vertical-align: middle; margin-left: 2px; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  footer {
+    margin-top: 34px; font-size: 12.5px; color: var(--paper-mute);
+    font-family: var(--mono); line-height: 1.7;
+  }
+  footer b { color: var(--paper-dim); font-weight: 500; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .check, .tx { transition: none !important; }
+    .cursor { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="mark">
+      <h1>Veritas</h1>
+      <span class="v">v0.1</span>
+      <span class="net"><span class="dot"></span>solana devnet</span>
+    </div>
+    <p class="tagline">
+      A plausibility instrument for physical claims. It scores whether reported
+      clean-energy and emissions figures are <b>physically possible</b> against
+      live grid data and physical law, then commits the verdict on-chain where
+      anyone can challenge it.
+    </p>
+  </header>
+
+  <div class="selector" id="selector"></div>
+
+  <div class="bench">
+    <div class="bench-head">
+      <span class="spec">asset: <b id="spec-asset">—</b></span>
+      <span class="spec">slot: <b id="spec-slot">—</b></span>
+      <button class="runbtn" id="run">Run verification</button>
+    </div>
+
+    <div class="figures" id="figures"></div>
+
+    <div class="checks" id="checks"></div>
+
+    <div class="gridnote" id="gridnote"></div>
+
+    <div class="verdict" id="verdict">
+      <div class="verdict-row">
+        <span class="stamp" id="stamp">—</span>
+        <span class="score">integrity score&nbsp; <span class="n" id="scoreval">—</span> / 1.00</span>
+      </div>
+
+      <div class="chain">
+        <div class="chain-title">on-chain commitment</div>
+        <div id="txlist"></div>
+        <div class="settle" id="settle"></div>
+      </div>
+    </div>
+  </div>
+
+  <footer id="footer"></footer>
+
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * Demo data. Verdicts mirror the Python engine's output exactly
+ * (engine/veritas/engine.py). In production the `verdict` object is
+ * fetched from the engine and the tx hashes come from real Anchor calls.
+ * Wiring points are marked ★.
+ * ------------------------------------------------------------------ */
+
+const GRID = 180;            // gCO2/kWh — live NESO value in production
+const PROGRAM = "Ver1tas1111111111111111111111111111111111111";
+
+// helper: fabricate a realistic-looking devnet signature for the demo
+function sig() {
+  const c = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  let s = ""; for (let i=0;i<88;i++) s += c[Math.random()*c.length|0]; return s;
+}
+function explorer(s) { return `https://explorer.solana.com/tx/${s}?cluster=devnet`; }
+
+const CASES = {
+  good: {
+    key: "case 01", title: "Plausible claim", desc: "5 MW solar, midday",
+    asset: "5 MW solar PV · North West England (region 3)",
+    slot: "2026-09-15 12:00–12:30Z",
+    figures: [
+      ["energy delivered", "1400", "kWh"],
+      ["claimed CO₂ avoided", "250", "kg"],
+      ["implied capacity factor", "56", "%"],
+    ],
+    hash: "ba1336b2a3e2242f9c07…d81f",
+    checks: [
+      ["temporal_validity","settlement-slot alignment & past-dated","valid past-dated 30-min settlement slot","pass"],
+      ["capacity_ceiling","conservation of energy · output ≤ capacity × time","implied capacity factor 56% ≤ 100%","pass"],
+      ["resource_envelope","solar irradiance limit · clear-sky ceiling","solar CF 56% within clear-sky ceiling 56%","pass"],
+      ["avoided_emissions_bound","avoided CO₂ ≤ energy × grid intensity","claimed 250 kg ≤ ceiling 252 kg at live grid 180 gCO₂/kWh","pass"],
+      ["internal_consistency","dimensional consistency","self-reported figures reconcile (0.99×)","pass"],
+    ],
+    verdict: "PLAUSIBLE", score: "0.95",
+    resolution: "confirmed",
+  },
+  impossible: {
+    key: "case 02", title: "Impossible energy", desc: "128% capacity factor",
+    asset: "5 MW solar PV · North West England (region 3)",
+    slot: "2026-09-15 12:00–12:30Z",
+    figures: [
+      ["energy delivered", "3200", "kWh"],
+      ["claimed CO₂ avoided", "500", "kg"],
+      ["implied capacity factor", "128", "%"],
+    ],
+    hash: "bea5fb3d88e55daa1c44…09ae",
+    checks: [
+      ["temporal_validity","settlement-slot alignment & past-dated","valid past-dated 30-min settlement slot","pass"],
+      ["capacity_ceiling","conservation of energy · output ≤ capacity × time","implied capacity factor 128% exceeds physical maximum 100% (3200 kWh vs 2500 kWh max for a 5 MW asset in 30 min)","fail"],
+      ["resource_envelope","solar irradiance limit · clear-sky ceiling","solar CF 128% exceeds clear-sky ceiling 56%","fail"],
+      ["avoided_emissions_bound","avoided CO₂ ≤ energy × grid intensity","not reached — hard failure upstream","skip"],
+      ["internal_consistency","dimensional consistency","no self-reported intensity supplied","skip"],
+    ],
+    verdict: "IMPOSSIBLE", score: "0.15",
+    resolution: "slashed",
+  },
+  inflated: {
+    key: "case 03", title: "Inflated carbon", desc: "plausible energy, false CO₂",
+    asset: "5 MW solar PV · North West England (region 3)",
+    slot: "2026-09-15 12:00–12:30Z",
+    figures: [
+      ["energy delivered", "1400", "kWh"],
+      ["claimed CO₂ avoided", "1800", "kg"],
+      ["implied capacity factor", "56", "%"],
+    ],
+    hash: "3ba0870a30542795745…a1d",
+    checks: [
+      ["temporal_validity","settlement-slot alignment & past-dated","valid past-dated 30-min settlement slot","pass"],
+      ["capacity_ceiling","conservation of energy · output ≤ capacity × time","implied capacity factor 56% ≤ 100%","pass"],
+      ["resource_envelope","solar irradiance limit · clear-sky ceiling","solar CF 56% within clear-sky ceiling 56%","pass"],
+      ["avoided_emissions_bound","avoided CO₂ ≤ energy × grid intensity","claimed 1800 kg but grid at 180 gCO₂/kWh over 1400 kWh caps avoided at 252 kg — over-claim of 1548 kg","fail"],
+      ["internal_consistency","dimensional consistency","no self-reported intensity supplied","skip"],
+    ],
+    verdict: "IMPOSSIBLE", score: "0.15",
+    resolution: "slashed",
+  },
+};
+
+/* ---- render selector ---- */
+const selEl = document.getElementById("selector");
+let current = "good";
+
+Object.entries(CASES).forEach(([id, c]) => {
+  const b = document.createElement("button");
+  b.className = "case" + (id === current ? " active" : "");
+  b.dataset.id = id;
+  b.innerHTML = `<span class="k">${c.key}</span>
+    <span class="t">${c.title}</span>
+    <span class="d">${c.desc}</span>`;
+  b.onclick = () => select(id);
+  selEl.appendChild(b);
+});
+
+const $ = s => document.querySelector(s);
+const badgeChar = { pass: "✓", fail: "✕", skip: "–" };
+
+function select(id) {
+  current = id;
+  document.querySelectorAll(".case").forEach(el =>
+    el.classList.toggle("active", el.dataset.id === id));
+  loadCase();
+}
+
+function loadCase() {
+  const c = CASES[current];
+  $("#spec-asset").textContent = c.asset;
+  $("#spec-slot").textContent = c.slot;
+
+  // figures
+  $("#figures").innerHTML = c.figures.map(([l,v,u]) =>
+    `<div class="fig"><div class="fl">${l}</div>
+     <div class="fv">${v} <span class="u">${u}</span></div></div>`).join("");
+
+  // reset dynamic zones
+  $("#checks").innerHTML = c.checks.map(ch =>
+    `<div class="check">
+       <span class="badge ${ch[3]}">${badgeChar[ch[3]]}</span>
+       <div>
+         <div class="name">${ch[0]}</div>
+         <div class="law">${ch[1]}</div>
+         <div class="detail">${ch[2]}</div>
+       </div>
+       <span class="verdict-tag ${ch[3]}">${ch[3].toUpperCase()}</span>
+     </div>`).join("");
+
+  $("#gridnote").className = "gridnote";
+  $("#verdict").className = "verdict";
+  $("#settle").className = "settle";
+  $("#txlist").innerHTML = "";
+  $("#run").disabled = false;
+  $("#run").textContent = "Run verification";
+}
+
+/* ---- run sequence ---- */
+async function run() {
+  const c = CASES[current];
+  const btn = $("#run");
+  btn.disabled = true; btn.textContent = "Running…";
+
+  const checks = document.querySelectorAll(".check");
+  for (let i = 0; i < checks.length; i++) {
+    await wait(360);
+    checks[i].classList.add("shown");
+  }
+
+  await wait(260);
+  const gn = $("#gridnote");
+  gn.innerHTML = `grid ground truth · NESO regional API · <b>${GRID} gCO₂/kWh</b> actual for this slot`;
+  gn.classList.add("shown");
+
+  await wait(320);
+  // verdict
+  $("#stamp").textContent = c.verdict;
+  $("#stamp").className = "stamp " + c.verdict;
+  $("#scoreval").textContent = c.score;
+  $("#verdict").classList.add("shown");
+
+  await wait(400);
+  await chainSequence(c);
+
+  btn.textContent = "Run again";
+  btn.disabled = false;
+}
+
+/* ---- on-chain sequence (★ real Anchor calls go here) ---- */
+async function chainSequence(c) {
+  const list = $("#txlist");
+  const slash = c.resolution === "slashed";
+
+  // 1. submit_claim  ★ program.methods.submitClaim(...).rpc()
+  const s1 = sig();
+  const submit = txRow("done",
+    "submit_claim",
+    `bond 0.10 SOL · score ${c.score} · hash ${c.hash}`,
+    s1);
+  list.appendChild(submit);
+  await reveal(submit);
+
+  await wait(650);
+
+  // 2. challenge_claim  ★ program.methods.challengeClaim(...).rpc()
+  const s2 = sig();
+  const chal = txRow("done",
+    "challenge_claim",
+    slash
+      ? `challenger stakes 0.05 SOL · re-derives matching hash`
+      : `challenger stakes 0.05 SOL · disputes a valid claim`,
+    s2);
+  list.appendChild(chal);
+  await reveal(chal);
+
+  await wait(700);
+
+  // 3. resolve  ★ program.methods.resolve().rpc()
+  const s3 = sig();
+  const res = txRow(slash ? "slash" : "done",
+    "resolve",
+    slash
+      ? `score 0.15 ≤ threshold 0.50 → claim slashed`
+      : `score 0.95 > threshold 0.50 → claim confirmed`,
+    s3);
+  list.appendChild(res);
+  await reveal(res);
+
+  await wait(450);
+
+  const st = $("#settle");
+  if (slash) {
+    st.className = "settle slashed shown";
+    st.innerHTML = `<b>Slashed.</b>&nbsp; The fabricated claim's 0.10 SOL bond transfers to the challenger. The claim never enters the market.`;
+  } else {
+    st.className = "settle confirmed shown";
+    st.innerHTML = `<b>Confirmed.</b>&nbsp; The claim survived challenge. Its integrity score is now readable on-chain by any consuming market.`;
+  }
+}
+
+function txRow(state, act, meta, s) {
+  const el = document.createElement("div");
+  el.className = "tx " + state;
+  const mark = state === "slash" ? "✕" : "✓";
+  el.innerHTML = `
+    <span class="ic">${mark}</span>
+    <div class="body">
+      <span class="act">${act}</span>
+      <div class="meta">${meta} · <a href="${explorer(s)}" target="_blank" rel="noopener">${s.slice(0,8)}…${s.slice(-6)} ↗</a></div>
+    </div>`;
+  return el;
+}
+
+const wait = ms => new Promise(r => setTimeout(r, ms));
+async function reveal(el) { await wait(30); el.classList.add("shown"); }
+
+$("#run").onclick = run;
+
+/* footer */
+$("#footer").innerHTML =
+  `program ${PROGRAM.slice(0,10)}… on devnet · grid data: UK Carbon Intensity API (NESO, CC BY 4.0)<br>` +
+  `<b>demo note:</b> verdicts mirror the Python engine exactly; on-chain signatures are simulated for a zero-setup demo. Wiring points for real Anchor calls are marked ★ in source.`;
+
+loadCase();
+</script>
+</body>
+</html>
