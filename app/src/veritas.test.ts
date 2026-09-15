@@ -386,4 +386,39 @@ describe("veritas", () => {
     assert.equal((await balance(submitter.publicKey)) - submitterBefore, bond);
     assert.equal((await balance(challenger.publicKey)) - challengerBefore, stake);
   });
+
+  it("lets only the upgrade authority rotate the resolver", async () => {
+    const impostor = Keypair.generate();
+    await fund(impostor);
+    const nextResolver = Keypair.generate();
+    const [programData] = PublicKey.findProgramAddressSync(
+      [program.programId.toBuffer()],
+      BPF_LOADER_UPGRADEABLE
+    );
+    // `null` signs with the provider wallet, which is the upgrade authority.
+    const setResolverIx = (authority: Keypair | null, next: PublicKey) => {
+      const builder = program.methods.setResolver(next).accountsPartial({
+        authority: authority ? authority.publicKey : provider.wallet.publicKey,
+        config,
+        program: program.programId,
+        programData,
+      });
+      return authority ? builder.signers([authority]) : builder;
+    };
+    const currentResolver = async () =>
+      (await program.account.config.fetch(config)).resolver.toBase58();
+
+    await expectError(
+      setResolverIx(impostor, nextResolver.publicKey),
+      "Unauthorized"
+    );
+    assert.equal(await currentResolver(), resolver.publicKey.toBase58());
+
+    await setResolverIx(null, nextResolver.publicKey).rpc(confirmed);
+    assert.equal(await currentResolver(), nextResolver.publicKey.toBase58());
+
+    // Put the original resolver back so the suite stays order-independent.
+    await setResolverIx(null, resolver.publicKey).rpc(confirmed);
+    assert.equal(await currentResolver(), resolver.publicKey.toBase58());
+  });
 });

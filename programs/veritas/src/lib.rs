@@ -57,6 +57,20 @@ pub mod veritas {
         Ok(())
     }
 
+    /// Rotate the resolver. Callable only by the program's upgrade authority.
+    pub fn set_resolver(ctx: Context<SetResolver>, new_resolver: Pubkey) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        let previous = config.resolver;
+        config.resolver = new_resolver;
+
+        emit!(ResolverChanged {
+            config: config.key(),
+            previous,
+            resolver: new_resolver,
+        });
+        Ok(())
+    }
+
     /// Commit a physics-scored claim. Escrows `bond` in the claim PDA.
     ///
     /// `integrity_score_bps` is the submitter's own engine score. It is recorded
@@ -316,6 +330,23 @@ pub struct InitializeConfig<'info> {
 }
 
 #[derive(Accounts)]
+pub struct SetResolver<'info> {
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [b"config"], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        constraint = program.programdata_address()? == Some(program_data.key())
+            @ VeritasError::Unauthorized
+    )]
+    pub program: Program<'info, Veritas>,
+    #[account(
+        constraint = program_data.upgrade_authority_address == Some(authority.key())
+            @ VeritasError::Unauthorized
+    )]
+    pub program_data: Account<'info, ProgramData>,
+}
+
+#[derive(Accounts)]
 #[instruction(inputs_hash: [u8; 32])]
 pub struct SubmitClaim<'info> {
     #[account(mut)]
@@ -532,6 +563,13 @@ pub struct ChallengeRefunded {
     pub challenger: Pubkey,
     pub bond: u64,
     pub stake: u64,
+}
+
+#[event]
+pub struct ResolverChanged {
+    pub config: Pubkey,
+    pub previous: Pubkey,
+    pub resolver: Pubkey,
 }
 
 // --------------------------------------------------------------------------- //
