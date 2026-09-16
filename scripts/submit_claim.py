@@ -21,6 +21,7 @@ prints the verdict + the exact instruction args you'd send.
 
 import argparse
 import hashlib
+import json
 import sys
 import os
 from datetime import datetime, timezone
@@ -99,7 +100,28 @@ def main():
     p.add_argument("--self-intensity", type=float, default=None)
     p.add_argument("--dry-run", action="store_true",
                    help="score only; print the on-chain args without submitting")
+    p.add_argument("--json", action="store_true",
+                   help="emit the instruction args as JSON for scripts/submit_onchain.js")
     args = p.parse_args()
+
+    if args.json:
+        claim = build_claim(args)
+        verdict = score(claim)
+        print(json.dumps({
+            "asset_id": asset_id(claim),
+            "inputs_hash": verdict.inputs_hash,
+            "model_version": MODEL_VERSION_ID,
+            "period_start": period_start(claim),
+            "claimed_co2_kg": round(claim.claimed_co2_avoided_kg),
+            "integrity_score_bps": score_to_bps(verdict.integrity_score),
+            "bond_lamports": 100_000_000,
+            "verdict": verdict.verdict,
+            "integrity_score": verdict.integrity_score,
+            "grid_intensity_gco2_kwh": verdict.grid_intensity_used,
+            "grid_data_source": verdict.grid_data_source,
+            "canonical": claim.canonical(),
+        }, indent=2))
+        return
 
     claim = build_claim(args)
     verdict = score(claim)
