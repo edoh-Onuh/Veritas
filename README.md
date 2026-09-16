@@ -105,6 +105,16 @@ quorum 1) with a 24h challenge window and a 72h resolution deadline. One member 
 `BWfN3N83CM8HT8X7p9QKaFp8To7ZazUcZ4BrebU9TdAz` (5 MW solar, DNO region 3, lat 53.5): 5 MW solar, asset id
 `01a27315adfb575973486b4afa1d42b2b286c274ead2762b6cd65ab19807bc80`.
 
+A complete loop is on devnet, not simulated: claim
+[`9zhiCikXgU6RztSXgoGESFGttmMxyomZCA48Bn3QWuk2`](https://explorer.solana.com/address/9zhiCikXgU6RztSXgoGESFGttmMxyomZCA48Bn3QWuk2?cluster=devnet)
+was scored by the engine against a 33 gCO₂/kWh grid, then
+[submitted](https://explorer.solana.com/tx/31Fd1UHv5T9x9XQ8vxtVvvt6mqCnDXH8DfKwVc27Y3SvheJqw8fKNacxo7GryWAJVcMLQ7s5KK3yqunCpMxFSajt?cluster=devnet),
+[challenged](https://explorer.solana.com/tx/2QptSUcknRmPMPT7HRf3G1Ksq3jFnwAYhwoTb6VBsn9gFpN2ng3kPNfmYdvfPqyp6TAiEkYUsP2jAhG8c51Wv9di?cluster=devnet)
+and [confirmed at 9500 bps](https://explorer.solana.com/tx/4x6ii9xYwaLp7jwYTHswvxgCEAjzdmmcVw99ByrWRyen943zQ5jJBhTUsgggM3qpneyzvKrR5sodegNkerBbqab9?cluster=devnet)
+by the committee, returning the bond. The challenge came from the same wallet that submitted it, because this
+deployment has one funded key — the program permits that, and the 50/50 split of a slashed bond is what stops it
+being profitable.
+
 Building your own deployment? Run `anchor keys list`, put your id in `declare_id!` and `Anchor.toml`, then call
 `initialize_config` once, and `register_asset` for each asset, before any claim can be submitted or challenged.
 `initialize_config`, `set_resolvers` and `register_asset` are all gated on the program's upgrade authority.
