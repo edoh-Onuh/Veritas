@@ -6,3 +6,7 @@ resolver = "2"
 overflow-checks = true
 lto = "fat"
 codegen-units = 1
+# Deploy and upgrade cost is rent on the byte count, and these instructions are
+# short: optimising for size rather than speed trades compute headroom we have
+# for SOL we would rather not spend twice. 481KB -> 422KB.
+opt-level = "z"
