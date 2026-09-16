@@ -163,7 +163,15 @@ Then, as the program's upgrade authority:
 Key handling: `anchor build` writes the program keypair to `target/deploy/`,
 which `.gitignore` excludes — keep that directory out of cloud-synced folders.
 The upgrade authority can replace the program and appoint the committee, so for
-anything beyond devnet it should be a multisig, not a laptop keypair.
+anything beyond devnet it should be a multisig, not a laptop keypair:
+
+```bash
+solana program set-upgrade-authority <PROGRAM_ID> --new-upgrade-authority <MULTISIG>
+```
+
+Do that *after* `initialize_config`, since the same authority gates the
+committee and the registry. Getting it wrong in the other order leaves a
+deployment nobody can configure.
 
 ## Honest limitations (and the roadmap they imply)
 

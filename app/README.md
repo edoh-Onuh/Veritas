@@ -43,6 +43,17 @@ fetch from the engine's `/score` output. Note that `submitClaim` must be signed
 by the asset's registered owner, and that each (asset, settlement slot) can be
 claimed only once.
 
+## live.js — the panel that reads the chain
+
+The three cases are a recording; `live.js` is not. It fetches the claim this
+deployment submitted, challenged and confirmed on devnet, decodes the Anchor
+account by hand, and renders it under the cases. Plain JSON-RPC and no
+dependencies, so the page stays a static file: open it from disk and the panel
+still fills in.
+
+Chain data goes in through `textContent`, never `innerHTML` — a claim's fields
+are a submitter's input, and the panel treats them as data rather than markup.
+
 ## veritas.test.ts — Anchor integration tests
 
 Run with `anchor test` from the repo root (see top-level README).

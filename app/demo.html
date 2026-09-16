@@ -240,6 +240,25 @@
     .check, .tx { transition: none !important; }
     .cursor { animation: none; }
   }
+  /* ---- live devnet panel ---- */
+  .live {
+    margin-top: 34px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--ink-2); padding: 18px 20px;
+  }
+  .live-head {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--signal); margin-bottom: 12px;
+  }
+  .live-body { font-family: var(--mono); font-size: 13px; color: var(--paper-dim); }
+  .live-row {
+    display: flex; justify-content: space-between; gap: 16px;
+    padding: 5px 0; border-bottom: 1px solid var(--ink-3);
+  }
+  .live-row:last-child { border-bottom: 0; }
+  .live-key { color: var(--paper-mute); }
+  .live-val { color: var(--paper); text-align: right; }
+  .live-val a { color: var(--signal); text-decoration: none; }
+  .live-val a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -288,10 +307,16 @@
     </div>
   </div>
 
+  <section class="live">
+    <div class="live-head">live on devnet — read from the chain, not recorded</div>
+    <div id="live-body" class="live-body">reading devnet…</div>
+  </section>
+
   <footer id="footer"></footer>
 
 </div>
 
+<script src="live.js"></script>
 <script>
 /* ------------------------------------------------------------------ *
  * Demo data. Verdicts mirror the Python engine's output exactly
@@ -538,6 +563,9 @@ $("#footer").innerHTML =
   `<b>demo note:</b> a recorded engine run against a grid at 180 gCO₂/kWh — the live engine re-scores every claim against current intensity, so its figures move. On-chain signatures are simulated for a zero-setup demo; wiring points for real Anchor calls are marked ★ in source.`;
 
 loadCase();
+
+/* The cases above are a recording; this reads the real claim on devnet. */
+VeritasLive.render(document.getElementById("live-body"));
 </script>
 </body>
 </html>
