@@ -32,7 +32,19 @@ node scripts/submit_onchain.js submit    /tmp/claim.json
 node scripts/submit_onchain.js show      /tmp/claim.json
 node scripts/submit_onchain.js challenge /tmp/claim.json [stakeLamports]
 node scripts/submit_onchain.js resolve   /tmp/claim.json <scoreBps>
+
+# who settles disputes on this deployment, and what it holds
+node scripts/submit_onchain.js config
+
+# widen the committee once you have independent re-runners (upgrade authority only)
+node scripts/submit_onchain.js committee <pubkey,pubkey,pubkey> 2
 ```
+
+A one-member committee is the weakest configuration the program allows: it is a
+single party deciding disputes, which is the trust the design exists to reduce.
+Members should be operators who can each re-run the engine themselves — the
+point is independent re-derivation, so several keys held by one person buy
+nothing.
 
 It reads the IDL from `target/idl/veritas.json` (override with `VERITAS_IDL`),
 derives every PDA from the claim's own figures, and prints an explorer link for

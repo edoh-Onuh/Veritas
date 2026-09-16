@@ -160,6 +160,12 @@ Then, as the program's upgrade authority:
 2. `register_asset(...)` — once per asset. Its capacity, region and latitude are what claims are judged against.
 3. `set_resolvers(...)` — whenever the committee changes. A one-member committee is the weakest configuration; use independent operators who can each re-run the engine.
 
+What it costs, so the wallet is not a surprise: an upgrade needs a temporary
+buffer of about **2.15 SOL** (refunded when the deploy succeeds, which is why
+the program is built with `opt-level = "z"`), and each claim costs its bond
+(0.1 SOL in these examples) plus roughly **0.003 SOL** of account rent, returned
+when the claim settles or its bond is withdrawn.
+
 Key handling: `anchor build` writes the program keypair to `target/deploy/`,
 which `.gitignore` excludes — keep that directory out of cloud-synced folders.
 The upgrade authority can replace the program and appoint the committee, so for

@@ -72,20 +72,26 @@ function pdas(program, claimArgs, submitter) {
 
 async function main() {
   const [command, argsPath, extra] = process.argv.slice(2);
-  if (!command || !argsPath) {
+  const CLAIM_COMMANDS = ["submit", "challenge", "resolve", "show"];
+  if (!command || (CLAIM_COMMANDS.includes(command) && !argsPath)) {
     console.error(
-      "usage: submit_onchain.js <submit|challenge|resolve|show> <claim.json> [stake|scoreBps]"
+      "usage: submit_onchain.js <submit|challenge|resolve|show> <claim.json> [stake|scoreBps]\n" +
+        "       submit_onchain.js config\n" +
+        "       submit_onchain.js committee <pubkey,pubkey,...> <quorum>"
     );
     process.exit(2);
   }
 
-  const claimArgs = JSON.parse(fs.readFileSync(argsPath, "utf8"));
-  if (!claimArgs.inputs_hash) {
-    console.error(
-      "this claim has no inputs_hash, so the engine refused to score it:",
-      claimArgs.verdict
-    );
-    process.exit(1);
+  let claimArgs = null;
+  if (CLAIM_COMMANDS.includes(command)) {
+    claimArgs = JSON.parse(fs.readFileSync(argsPath, "utf8"));
+    if (!claimArgs.inputs_hash) {
+      console.error(
+        "this claim has no inputs_hash, so the engine refused to score it:",
+        claimArgs.verdict
+      );
+      process.exit(1);
+    }
   }
 
   const provider = anchor.AnchorProvider.env();
@@ -94,12 +100,65 @@ async function main() {
   const program = new anchor.Program(idl, provider);
   const wallet = provider.wallet.publicKey;
   const rpc = provider.connection.rpcEndpoint;
-  const p = pdas(program, claimArgs, wallet);
   const confirmed = { commitment: "confirmed" };
+  const [configPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("config-v2")],
+    program.programId
+  );
+  const [programData] = PublicKey.findProgramAddressSync(
+    [program.programId.toBuffer()],
+    new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111")
+  );
 
   console.log(`program   : ${program.programId.toBase58()}`);
   console.log(`rpc       : ${rpc}`);
   console.log(`wallet    : ${wallet.toBase58()}`);
+
+  if (command === "config") {
+    const cfg = await program.account.config.fetchNullable(configPda);
+    if (!cfg) return console.log("config: not initialised on this cluster");
+    console.log("config    :", configPda.toBase58());
+    console.log("committee :", cfg.resolvers.map((r) => r.toBase58()).join(", "));
+    console.log("quorum    :", `${cfg.quorum} of ${cfg.resolvers.length}`);
+    console.log(
+      "windows   :",
+      `challenge ${cfg.challengeWindowSecs}s, resolve ${cfg.resolveWindowSecs}s`
+    );
+    console.log(
+      "balance   :",
+      await provider.connection.getBalance(configPda, "confirmed"),
+      "lamports (rent + the protocol's share of slashed bonds)"
+    );
+    return;
+  }
+
+  if (command === "committee") {
+    if (!argsPath || extra === undefined) {
+      console.error(
+        "committee needs members and a quorum: committee <pubkey,pubkey,...> <quorum>"
+      );
+      process.exit(2);
+    }
+    const members = argsPath.split(",").map((s) => new PublicKey(s.trim()));
+    const quorum = Number(extra);
+    // The program rejects a quorum larger than the committee, duplicate
+    // members, and anyone who is not the upgrade authority.
+    const sig = await program.methods
+      .setResolvers(members, quorum)
+      .accountsPartial({
+        authority: wallet,
+        config: configPda,
+        program: program.programId,
+        programData,
+      })
+      .rpc(confirmed);
+    console.log(`committee : ${members.length} members, quorum ${quorum}`);
+    console.log("signature :", sig);
+    console.log("explorer  :", explorer(sig, rpc));
+    return;
+  }
+
+  const p = pdas(program, claimArgs, wallet);
   console.log(`claim PDA : ${p.claim.toBase58()}`);
 
   if (command === "show") {
