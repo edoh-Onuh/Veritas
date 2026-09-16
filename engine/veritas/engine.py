@@ -32,10 +32,27 @@ from __future__ import annotations
 import json
 import hashlib
 import math
+import re
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
+
+# The one timestamp shape the NESO API accepts, and the only one we will put
+# into a request path.
+_SLOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}Z$")
+
+
+def _intensity_url(region_id: int, period_from: str) -> str:
+    """The NESO regional endpoint for one settlement slot.
+
+    `period_from` goes into the path, so callers match it against `_SLOT_RE`
+    first. Every character that shape allows — digits, '-', 'T', ':', 'Z' — is
+    legal in a path segment, and percent-encoding them makes the API reject the
+    request, so the timestamp is interpolated as-is.
+    """
+    return ("https://api.carbonintensity.org.uk/regional/intensity/"
+            f"{period_from}/fw24h/regionid/{int(region_id)}")
 
 try:
     import requests
@@ -47,6 +64,34 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 # Claim schema
 # --------------------------------------------------------------------------- #
+
+# Identifies the canonical serialization these hashes are taken over. Bump it if
+# the shape or the units below ever change: a claim hashed under one schema must
+# never collide with the same figures hashed under another.
+CANONICAL_SCHEMA = "veritas-claim-1"
+
+# The integer the on-chain `model_version` field carries, paired with the engine
+# string in `Claim.model_version`. The bridge and the client commit this.
+MODEL_VERSION_ID = 1
+
+
+def _exact_int(value: float, scale: int, field: str) -> int:
+    """Scale a quantity to its integer unit, refusing anything unrepresentable.
+
+    Raises rather than rounding silently: a claim whose figures cannot be
+    committed exactly has no business acquiring a hash that says they were.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} is not a number: {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{field} is not finite: {value!r}")
+    scaled = value * scale
+    rounded = round(scaled)
+    if abs(scaled - rounded) > 1e-6:
+        raise ValueError(
+            f"{field}={value!r} is finer than the committed unit (1/{scale})")
+    return int(rounded)
+
 
 class AssetType(str, Enum):
     SOLAR_PV = "solar_pv"
@@ -76,24 +121,43 @@ class Claim:
 
     def canonical(self) -> str:
         """Deterministic JSON serialization — the exact bytes that get hashed
-        and committed on-chain. Sorted keys, no whitespace drift."""
+        and committed on-chain. Sorted keys, no whitespace drift.
+
+        Every quantity is an integer in a named unit, because floats do not
+        survive the trip between languages: Python prints ``1400.0`` where
+        JavaScript prints ``1400``, so a challenger re-deriving this hash from
+        the same claim in the TypeScript client would get a different digest and
+        `challenge_claim` would reject them. Integers also make NaN and infinity
+        impossible to commit — `json.dumps` would happily write a bare ``NaN``,
+        which is not valid JSON for anyone else to parse.
+        """
         payload = {
+            "schema": CANONICAL_SCHEMA,
             "submitter": self.submitter,
             "asset": {
                 "type": self.asset.type.value,
-                "nameplate_capacity_kw": self.asset.nameplate_capacity_kw,
-                "region_id": self.asset.region_id,
-                "latitude": self.asset.latitude,
+                "nameplate_capacity_w": _exact_int(
+                    self.asset.nameplate_capacity_kw, 1000, "nameplate_capacity_kw"),
+                "region_id": int(self.asset.region_id),
+                "latitude_microdeg": _exact_int(
+                    self.asset.latitude, 1_000_000, "latitude"),
                 "location_hint": self.asset.location_hint,
             },
             "period_from": self.period_from,
             "period_to": self.period_to,
-            "energy_delivered_kwh": self.energy_delivered_kwh,
-            "claimed_co2_avoided_kg": self.claimed_co2_avoided_kg,
-            "self_reported_intensity_gco2_kwh": self.self_reported_intensity_gco2_kwh,
+            "energy_delivered_wh": _exact_int(
+                self.energy_delivered_kwh, 1000, "energy_delivered_kwh"),
+            "claimed_co2_avoided_g": _exact_int(
+                self.claimed_co2_avoided_kg, 1000, "claimed_co2_avoided_kg"),
+            "self_reported_intensity_mgco2_kwh": (
+                None if self.self_reported_intensity_gco2_kwh is None
+                else _exact_int(self.self_reported_intensity_gco2_kwh, 1000,
+                                "self_reported_intensity_gco2_kwh")
+            ),
             "model_version": self.model_version,
         }
-        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=True, allow_nan=False)
 
     def inputs_hash(self) -> str:
         """sha256 of the canonical claim — Anchor `inputs_hash` (hex)."""
@@ -179,13 +243,14 @@ def fetch_grid_intensity(region_id: int, period_from: str) -> tuple[Optional[flo
     """
     if region_id not in VALID_REGION_IDS:
         return None, f"unknown DNO region id {region_id} (valid: 1..17)"
+    if not _SLOT_RE.match(period_from):
+        # The timestamp is interpolated into the request path, so it is checked
+        # against the one shape the API accepts before it gets there.
+        return None, f"malformed settlement slot {period_from!r} (want YYYY-MM-DDTHH:MMZ)"
     if not _HAVE_REQUESTS:
         return None, "live grid data unavailable (requests not installed)"
 
-    url = (
-        f"https://api.carbonintensity.org.uk/regional/intensity/"
-        f"{period_from}/fw24h/regionid/{region_id}"
-    )
+    url = _intensity_url(region_id, period_from)
     try:
         r = requests.get(url, headers={"Accept": "application/json"}, timeout=8)
         r.raise_for_status()
@@ -194,9 +259,14 @@ def fetch_grid_intensity(region_id: int, period_from: str) -> tuple[Optional[flo
         # only the slot whose 'from' matches our period start will do
         for slot in slots:
             if slot["from"] == period_from:
-                val = slot["intensity"].get("forecast")  # regional gives forecast
-                if val is not None:
-                    return float(val), f"NESO regional API (forecast, region {region_id})"
+                intensity = slot["intensity"]
+                # Settled 'actual' first: forecasts are revised after the fact,
+                # so scoring against one makes the same claim score differently
+                # tomorrow, and a challenger cannot reproduce today's verdict.
+                for kind in ("actual", "forecast"):
+                    val = intensity.get(kind)
+                    if val is not None:
+                        return float(val), f"NESO regional API ({kind}, region {region_id})"
         return None, "live grid data unavailable (no matching settlement slot)"
     except Exception as e:  # network, shape, timeout — no ground truth, no verdict
         return None, f"live grid data unavailable ({type(e).__name__})"
@@ -440,13 +510,19 @@ def score(claim: Claim) -> Verdict:
     # would silently pass them, and the timestamp checks would raise.
     validity = check_input_validity(claim)
     if validity.status == Status.HARD_FAIL:
+        try:
+            rejected_hash = claim.inputs_hash()
+        except ValueError:
+            # Figures like NaN cannot be committed at all, so there is no hash
+            # to report — that is the point of rejecting them.
+            rejected_hash = ""
         return Verdict(
             verdict="INVALID",
             integrity_score=0.0,
             hardest_failure=validity.id,
             grid_intensity_used=None,
             grid_data_source="not fetched (claim rejected before scoring)",
-            inputs_hash=claim.inputs_hash(),
+            inputs_hash=rejected_hash,
             checks=[validity],
         )
 

@@ -39,6 +39,17 @@ pub const IMPLAUSIBLE_THRESHOLD_BPS: u16 = 5000;
 /// Minimum bond a submitter must stake (lamports). 0.05 SOL.
 pub const MIN_BOND_LAMPORTS: u64 = 50_000_000;
 
+/// A challenge must risk at least this share of the bond, in basis points.
+/// A one-lamport challenge is free griefing: it locks a claim into a dispute,
+/// costs the challenger nothing, and makes the committee do the work.
+pub const MIN_STAKE_BPS: u64 = 1_000; // 10%
+
+/// Share of a slashed bond paid to the challenger, in basis points. The rest
+/// stays with the protocol, because a submitter who challenges their own claim
+/// from a second wallet would otherwise collect their whole bond back and walk
+/// away from a fabricated claim having lost nothing.
+pub const CHALLENGER_SLASH_SHARE_BPS: u64 = 5_000; // 50%
+
 /// Upper bound on committee size, so Config stays a fixed-size account.
 pub const MAX_RESOLVERS: usize = 5;
 
@@ -229,7 +240,12 @@ pub mod veritas {
             now <= claim.created_at.saturating_add(window),
             VeritasError::ChallengeWindowClosed
         );
-        require!(stake > 0, VeritasError::ZeroStake);
+        let min_stake = claim
+            .bond
+            .saturating_mul(MIN_STAKE_BPS)
+            .saturating_div(10_000)
+            .max(1);
+        require!(stake >= min_stake, VeritasError::StakeTooLow);
         require!(
             recomputed_hash == claim.inputs_hash,
             VeritasError::HashMismatch
@@ -311,14 +327,32 @@ pub mod veritas {
 
         if agreeing >= quorum {
             let slashed = score_bps <= IMPLAUSIBLE_THRESHOLD_BPS;
-            let winner = if slashed {
-                ctx.accounts.challenger.to_account_info()
-            } else {
-                ctx.accounts.submitter.to_account_info()
-            };
             let (bond, stake) = (claim.bond, challenge.stake);
-            move_lamports(&claim.to_account_info(), &winner, bond)?;
-            move_lamports(&challenge.to_account_info(), &winner, stake)?;
+            let challenger_reward;
+            let protocol_share;
+            if slashed {
+                // Split the bond. Paying the whole thing to the challenger
+                // makes a self-challenge free: the same person funds both
+                // sides, so a slash would return their own money.
+                challenger_reward = bond
+                    .saturating_mul(CHALLENGER_SLASH_SHARE_BPS)
+                    .saturating_div(10_000);
+                protocol_share = bond.saturating_sub(challenger_reward);
+                let challenger_info = ctx.accounts.challenger.to_account_info();
+                move_lamports(&claim.to_account_info(), &challenger_info, challenger_reward)?;
+                move_lamports(
+                    &claim.to_account_info(),
+                    &ctx.accounts.config.to_account_info(),
+                    protocol_share,
+                )?;
+                move_lamports(&challenge.to_account_info(), &challenger_info, stake)?;
+            } else {
+                challenger_reward = 0;
+                protocol_share = 0;
+                let submitter_info = ctx.accounts.submitter.to_account_info();
+                move_lamports(&claim.to_account_info(), &submitter_info, bond)?;
+                move_lamports(&challenge.to_account_info(), &submitter_info, stake)?;
+            }
 
             claim.status = if slashed {
                 ClaimStatus::Slashed
@@ -336,6 +370,8 @@ pub mod veritas {
                 submitted_score_bps: claim.integrity_score_bps,
                 final_score_bps: score_bps,
                 agreeing,
+                challenger_reward,
+                protocol_share,
             });
         } else if votes_cast >= committee_size {
             // The committee saw the same inputs and disagreed. Nobody wins a
@@ -435,6 +471,35 @@ pub mod veritas {
             bond,
             stake,
             reason: RefundReason::CommitteeSilent,
+        });
+        Ok(())
+    }
+
+    /// Reclaim the rent of a settled challenge account. Anyone can crank it;
+    /// the rent goes back to the challenger who paid it.
+    pub fn close_challenge(_ctx: Context<CloseChallenge>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Move the protocol's share of slashed bonds out of the Config account.
+    /// Callable only by the program's upgrade authority, and it can never spend
+    /// the rent that keeps Config alive.
+    pub fn withdraw_treasury(ctx: Context<WithdrawTreasury>, amount: u64) -> Result<()> {
+        let config_info = ctx.accounts.config.to_account_info();
+        let rent_exempt = Rent::get()?.minimum_balance(config_info.data_len());
+        let available = config_info.lamports().saturating_sub(rent_exempt);
+        require!(amount <= available, VeritasError::InsufficientFunds);
+
+        move_lamports(
+            &config_info,
+            &ctx.accounts.destination.to_account_info(),
+            amount,
+        )?;
+
+        emit!(TreasuryWithdrawn {
+            config: ctx.accounts.config.key(),
+            destination: ctx.accounts.destination.key(),
+            amount,
         });
         Ok(())
     }
@@ -597,7 +662,8 @@ pub struct ChallengeClaim<'info> {
 pub struct SubmitResolution<'info> {
     /// A committee member, re-running the engine on the committed inputs.
     pub resolver: Signer<'info>,
-    #[account(seeds = [b"config-v2"], bump = config.bump)]
+    /// Mutable because a slashed bond leaves the protocol's share here.
+    #[account(mut, seeds = [b"config-v2"], bump = config.bump)]
     pub config: Account<'info, Config>,
     #[account(
         mut,
@@ -662,6 +728,49 @@ pub struct RefundExpiredChallenge<'info> {
     /// CHECK: validated to equal the recorded challenger; receives the refunded stake.
     #[account(mut, address = challenge.challenger @ VeritasError::WrongChallenger)]
     pub challenger: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseChallenge<'info> {
+    /// Anyone can crank a rent reclaim; the rent goes to the challenger.
+    pub cranker: Signer<'info>,
+    #[account(
+        seeds = [b"claim", claim.submitter.as_ref(), claim.inputs_hash.as_ref()],
+        bump = claim.bump,
+    )]
+    pub claim: Account<'info, Claim>,
+    #[account(
+        mut,
+        close = challenger,
+        seeds = [b"challenge", claim.key().as_ref()],
+        bump = challenge.bump,
+        constraint = challenge.claim == claim.key() @ VeritasError::ChallengeMismatch,
+        constraint = challenge.resolved @ VeritasError::NotResolvable,
+    )]
+    pub challenge: Account<'info, Challenge>,
+    /// CHECK: validated to equal the recorded challenger; receives the rent it paid.
+    #[account(mut, address = challenge.challenger @ VeritasError::WrongChallenger)]
+    pub challenger: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawTreasury<'info> {
+    pub authority: Signer<'info>,
+    #[account(mut, seeds = [b"config-v2"], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        constraint = program.programdata_address()? == Some(program_data.key())
+            @ VeritasError::Unauthorized
+    )]
+    pub program: Program<'info, Veritas>,
+    #[account(
+        constraint = program_data.upgrade_authority_address == Some(authority.key())
+            @ VeritasError::Unauthorized
+    )]
+    pub program_data: Account<'info, ProgramData>,
+    /// CHECK: any account the upgrade authority names; receives the withdrawal.
+    #[account(mut)]
+    pub destination: UncheckedAccount<'info>,
 }
 
 // --------------------------------------------------------------------------- //
@@ -825,6 +934,15 @@ pub struct ClaimResolved {
     pub submitted_score_bps: u16,
     pub final_score_bps: u16,
     pub agreeing: u8,
+    pub challenger_reward: u64,
+    pub protocol_share: u64,
+}
+
+#[event]
+pub struct TreasuryWithdrawn {
+    pub config: Pubkey,
+    pub destination: Pubkey,
+    pub amount: u64,
 }
 
 #[event]
@@ -865,6 +983,8 @@ pub enum VeritasError {
     NotChallengeable,
     #[msg("Stake must be greater than zero")]
     ZeroStake,
+    #[msg("Stake must be at least 10% of the bond being challenged")]
+    StakeTooLow,
     #[msg("Recomputed hash does not match the committed inputs hash")]
     HashMismatch,
     #[msg("Claim is not in a resolvable state")]

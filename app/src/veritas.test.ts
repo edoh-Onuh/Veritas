@@ -178,9 +178,14 @@ describe("veritas", () => {
       .signers([submitter]);
   }
 
-  function challengeIx(challenger: Keypair, claim: PublicKey, hash: number[]) {
+  function challengeIx(
+    challenger: Keypair,
+    claim: PublicKey,
+    hash: number[],
+    amount = stake
+  ) {
     return program.methods
-      .challengeClaim(hash, new anchor.BN(stake))
+      .challengeClaim(hash, new anchor.BN(amount))
       .accountsPartial({
         challenger: challenger.publicKey,
         config,
@@ -304,7 +309,110 @@ describe("veritas", () => {
     assert.equal(Object.keys(claimAcc.status)[0], "slashed");
     assert.equal(claimAcc.resolvedScoreBps, 1500);
     assert.equal(claimAcc.integrityScoreBps, 9500); // self-reported, and ignored
-    assert.equal((await balance(challenger.publicKey)) - before, bond + stake);
+    // Half the bond rewards the challenger; the other half stays with the
+    // protocol, so challenging your own claim cannot refund your own bond.
+    assert.equal(
+      (await balance(challenger.publicKey)) - before,
+      bond / 2 + stake
+    );
+  });
+
+  it("keeps the protocol's half of a slashed bond in the Config account", async () => {
+    const { submitter, challenger, claim } = await disputedClaim("treasury-1");
+    const before = await balance(config);
+
+    for (const member of [committee[0], committee[1]]) {
+      await voteIx(
+        member,
+        1500,
+        claim,
+        submitter.publicKey,
+        challenger.publicKey
+      ).rpc(confirmed);
+    }
+
+    assert.equal(await claimStatus(claim), "slashed");
+    assert.equal((await balance(config)) - before, bond / 2);
+  });
+
+  it("rejects a challenge that risks too little to be worth answering", async () => {
+    const submitter = Keypair.generate();
+    const griefer = Keypair.generate();
+    await fund(submitter);
+    await fund(griefer);
+    const { assetId, asset } = await registerAsset("grief-1", submitter.publicKey);
+    const hash = sha256("grief-1-claim");
+    await submitClaimIx(submitter, assetId, asset, hash, finishedSlot(), 9500).rpc(
+      confirmed
+    );
+    const claim = claimPda(submitter.publicKey, hash);
+
+    await expectError(challengeIx(griefer, claim, hash, 1), "StakeTooLow");
+    assert.equal(await claimStatus(claim), "pending");
+  });
+
+  it("returns the challenge account's rent once it is settled", async () => {
+    const { submitter, challenger, claim } = await disputedClaim("rent-1");
+    const challenge = challengePda(claim);
+
+    const closeIx = () =>
+      program.methods.closeChallenge().accountsPartial({
+        cranker: provider.wallet.publicKey,
+        claim,
+        challenge,
+        challenger: challenger.publicKey,
+      });
+
+    // Not while the dispute is live.
+    await expectError(closeIx(), "NotResolvable");
+
+    for (const member of [committee[0], committee[1]]) {
+      await voteIx(
+        member,
+        9500,
+        claim,
+        submitter.publicKey,
+        challenger.publicKey
+      ).rpc(confirmed);
+    }
+
+    const rent = (await connection.getAccountInfo(challenge, "confirmed"))!.lamports;
+    const before = await balance(challenger.publicKey);
+    await closeIx().rpc(confirmed);
+
+    assert.isNull(await connection.getAccountInfo(challenge, "confirmed"));
+    assert.equal((await balance(challenger.publicKey)) - before, rent);
+  });
+
+  it("lets only the upgrade authority withdraw the treasury, never its rent", async () => {
+    const impostor = Keypair.generate();
+    const destination = Keypair.generate();
+    await fund(impostor);
+
+    const withdrawIxFor = (authority: Keypair | null, amount: number) => {
+      const builder = program.methods
+        .withdrawTreasury(new anchor.BN(amount))
+        .accountsPartial({
+          authority: authority ? authority.publicKey : provider.wallet.publicKey,
+          config,
+          program: program.programId,
+          programData,
+          destination: destination.publicKey,
+        });
+      return authority ? builder.signers([authority]) : builder;
+    };
+
+    await expectError(withdrawIxFor(impostor, 1000), "Unauthorized");
+    // The whole balance would strip the rent that keeps Config alive.
+    await expectError(
+      withdrawIxFor(null, await balance(config)),
+      "InsufficientFunds"
+    );
+
+    const amount = bond / 4;
+    const before = await balance(destination.publicKey);
+    await withdrawIxFor(null, amount).rpc(confirmed);
+    assert.equal((await balance(destination.publicKey)) - before, amount);
   });
 
   it("confirms a claim the quorum scores as plausible and pays bond plus stake", async () => {

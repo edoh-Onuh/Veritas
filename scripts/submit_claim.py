@@ -28,7 +28,9 @@ from datetime import datetime, timezone
 # make the engine importable whether run from repo root or scripts/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "engine"))
 
-from veritas.engine import Asset, AssetType, Claim, score, demo_claims  # noqa: E402
+from veritas.engine import (  # noqa: E402
+    Asset, AssetType, Claim, score, demo_claims, MODEL_VERSION_ID,
+)
 
 
 def build_claim(args) -> Claim:
@@ -112,9 +114,9 @@ def main():
     print("On-chain commitment (submit_claim instruction args):")
     print(f"  asset_id             : {asset_id(claim)}")
     print(f"  inputs_hash          : {verdict.inputs_hash}")
-    print(f"  model_version        : 1")
+    print(f"  model_version        : {MODEL_VERSION_ID}  ({claim.model_version})")
     print(f"  period_start         : {period_start(claim)}  ({claim.period_from})")
-    print(f"  claimed_co2_kg       : {int(claim.claimed_co2_avoided_kg)}")
+    print(f"  claimed_co2_kg       : {round(claim.claimed_co2_avoided_kg)}")
     print(f"  integrity_score_bps  : {bps}")
     print(f"  bond (lamports)      : 100000000  (0.1 SOL)")
     print("\n  The asset must already be registered on-chain under this asset_id,")

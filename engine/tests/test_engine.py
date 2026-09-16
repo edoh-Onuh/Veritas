@@ -188,6 +188,68 @@ def test_inputs_hash_is_deterministic():
 
 # --- input validity: figures that are not quantities ----------------------- #
 
+def test_canonical_commits_integers_in_named_units():
+    """Floats do not survive between languages: Python writes 1400.0 where
+    JavaScript writes 1400, and the two hash differently."""
+    c = Claim("x", _asset(), "2026-01-01T12:00Z", "2026-01-01T12:30Z",
+              energy_delivered_kwh=1400, claimed_co2_avoided_kg=250,
+              self_reported_intensity_gco2_kwh=180)
+    canonical = c.canonical()
+    assert '"schema":"veritas-claim-1"' in canonical
+    assert '"energy_delivered_wh":1400000' in canonical
+    assert '"claimed_co2_avoided_g":250000' in canonical
+    assert '"nameplate_capacity_w":5000000' in canonical
+    assert '"latitude_microdeg":53500000' in canonical
+    assert '"self_reported_intensity_mgco2_kwh":180000' in canonical
+    assert "." not in canonical.split('"location_hint"')[0]  # no float anywhere
+
+
+def test_int_and_float_figures_hash_identically():
+    """The same claim typed as ints or floats must commit to one digest, or a
+    challenger re-deriving it in another language is locked out."""
+    pf, pt = _noon_slot()
+    as_ints = Claim("h", _asset(cap=5000), pf, pt, 1400, 250)
+    as_floats = Claim("h", _asset(cap=5000.0), pf, pt, 1400.0, 250.0)
+    assert as_ints.inputs_hash() == as_floats.inputs_hash()
+
+
+def test_nan_cannot_acquire_a_hash():
+    pf, pt = _noon_slot()
+    c = Claim("h", _asset(), pf, pt, float("nan"), 250)
+    with pytest.raises(ValueError):
+        c.inputs_hash()
+
+
+def test_invalid_claim_scores_without_a_hash():
+    pf, pt = _noon_slot()
+    v = score(Claim("h", _asset(), pf, pt, float("nan"), 250))
+    assert v.verdict == "INVALID"
+    assert v.inputs_hash == ""
+
+
+def test_figures_finer_than_the_committed_unit_are_refused():
+    pf, pt = _noon_slot()
+    c = Claim("h", _asset(), pf, pt, 1400.0000001, 250)
+    with pytest.raises(ValueError):
+        c.inputs_hash()
+
+
+def test_intensity_url_leaves_the_slot_unencoded():
+    """The colons are legal in a path segment; percent-encoding them makes the
+    API reject the request, which the offline tests would never notice."""
+    from veritas.engine import _intensity_url
+    assert _intensity_url(3, "2026-01-01T12:00Z") == (
+        "https://api.carbonintensity.org.uk/regional/intensity/"
+        "2026-01-01T12:00Z/fw24h/regionid/3"
+    )
+
+
+def test_fetch_rejects_a_malformed_slot_before_building_a_url():
+    value, source = fetch_grid_intensity(3, "2026-01-01T12:00:00Z")
+    assert value is None
+    assert "malformed" in source
+
+
 def test_input_validity_passes_a_normal_claim():
     pf, pt = _noon_slot()
     c = Claim("x", _asset(), pf, pt, 1400, 250, self_reported_intensity_gco2_kwh=180)

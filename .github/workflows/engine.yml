@@ -1,0 +1,22 @@
+name: engine
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -r engine/requirements.txt
+      # The suite stubs live grid data, so it neither needs the network nor
+      # depends on what the GB grid happens to be doing.
+      - name: Test
+        working-directory: engine
+        run: python -m pytest tests -q

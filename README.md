@@ -113,6 +113,48 @@ Building your own deployment? Run `anchor keys list`, put your id in `declare_id
 
 > **Verified vs. build-locally.** The Python engine and its 16 tests, and the bridge script, are tested and passing in this repo. The Rust program and TypeScript tests are written against the Anchor 0.30.1 API but must be compiled with the Solana/Anchor toolchain on your machine — those toolchains aren't installable in the sandbox this was authored in. Build them locally before the demo.
 
+## Security review
+
+Veritas was reviewed against its own threat model, and the findings were fixed
+before this was called ready. They are listed so nobody has to take the word
+"reviewed" on trust:
+
+| Finding | Fix |
+|---|---|
+| The submitter's own score settled its dispute, so committing 10000 won every challenge | a quorum of a committee of independent re-runners settles it (`submit_resolution`) |
+| Bonds could be locked forever — no withdrawal path existed | challenge windows, `withdraw_bond`, payout at settlement, refunds on a split or a silent committee |
+| A submitter could challenge their own claim and recover the whole slashed bond | half a slashed bond stays with the protocol, so fabrication still costs |
+| A one-lamport challenge could lock a claim into a dispute for free | a challenge must risk at least 10% of the bond |
+| Claims were free-floating: capacity, type and owner were whatever the submitter typed | a claim names a registered `Asset`, only its owner can claim its output, and a `Reading` PDA makes each (asset, settlement slot) claimable once |
+| Missing live grid data silently scored the claim against a bundled 180 gCO₂/kWh | `UNVERIFIED` at the implausibility threshold; unknown regions and malformed slots are rejected outright |
+| `NaN`, infinity and negative figures scored PLAUSIBLE — NaN compares false against every bound | an input-validity gate runs before any physics check |
+| A soft failure scored 0.55, above the on-chain 0.50 threshold, so a correct challenge lost | soft failures score 0.45 |
+| The commitment hash did not survive between languages (`1400.0` vs `1400`) | every quantity is an integer in a named unit, under a schema tag |
+| Rent for settled challenge accounts was stranded | `close_challenge` returns it to whoever paid it |
+
+Deliberately still open, and named in the limitations below: a colluding quorum
+is trusted, and the meter reading inside a registered asset's envelope is still
+the submitter's word.
+
+## Deploying
+
+```bash
+export RUSTUP_TOOLCHAIN=nightly-2025-04-10   # IDL generation only
+anchor build
+anchor deploy --provider.cluster devnet
+```
+
+Then, as the program's upgrade authority:
+
+1. `initialize_config(resolvers, quorum, challenge_window_secs, resolve_window_secs)` — once per deployment. Nothing can be challenged until it exists.
+2. `register_asset(...)` — once per asset. Its capacity, region and latitude are what claims are judged against.
+3. `set_resolvers(...)` — whenever the committee changes. A one-member committee is the weakest configuration; use independent operators who can each re-run the engine.
+
+Key handling: `anchor build` writes the program keypair to `target/deploy/`,
+which `.gitignore` excludes — keep that directory out of cloud-synced folders.
+The upgrade authority can replace the program and appoint the committee, so for
+anything beyond devnet it should be a multisig, not a laptop keypair.
+
 ## Honest limitations (and the roadmap they imply)
 
 These are stated plainly because scoped honesty is a strength, not a gap — and each names a real research direction:
